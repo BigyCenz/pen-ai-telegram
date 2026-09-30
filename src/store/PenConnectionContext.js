@@ -197,7 +197,11 @@ export function PenConnectionProvider({ children }) {
         pushLog(`Stato penna: batteria ${status.devPower ?? '?'}%, wifi "${status.wifiName ?? '?'}", fw ${status.version ?? '?'}`);
       }
 
-      client.startLiveView();
+      // Non avviamo più startLiveView() qui: parte in modo lazy al primo
+      // scatto (dentro requestSnapshot), altrimenti la penna comincia a
+      // martellare di dati la connessione fin da subito, anche restando
+      // sulla schermata senza scattare, ed è quello che rendeva tutta la
+      // UI lenta/bloccata appena connessi.
       clientRef.current = client;
 
       setPenInfo({

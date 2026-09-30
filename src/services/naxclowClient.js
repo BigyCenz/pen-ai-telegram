@@ -179,6 +179,7 @@ export class NaxclowClient {
 
     this._keepaliveTimer = null;
     this._livePreviewOff = null;
+    this._liveViewStarted = false;
   }
 
   connect(timeoutMs = 5000) {
@@ -262,6 +263,18 @@ export class NaxclowClient {
   // di agganciarsi a metà di un frame già in corso, poi si accumula fino al
   // marker di fine (EOI, FF D9).
   _handleImageChunk(payload) {
+    // Nessuno sta aspettando un frame (né requestSnapshot né la preview
+    // live sono attivi): scarta subito senza ricostruire nulla. Evita di
+    // continuare ad accumulare/concatenare Buffer per JPEG che non
+    // servono a nessuno, che è il lavoro più pesante fatto ad ogni singolo
+    // chunk in arrivo (la penna ne manda in continuazione appena la live
+    // view è attiva).
+    if (this.frameHandlers.length === 0) {
+      this._assembling = false;
+      this._imgAssembleBuf = Buffer.alloc(0);
+      return;
+    }
+
     let buf = payload;
 
     if (!this._assembling) {
@@ -397,16 +410,29 @@ export class NaxclowClient {
   // Avvia la live view lato penna: da qui in poi la penna trasmette in
   // autonomia un flusso continuo di frame JPEG (type=1) intrecciati a video
   // live non decifrato (type=4), senza bisogno di altri comandi espliciti.
+  //
+  // IMPORTANTE: non va chiamata subito dopo la connessione/login, solo
+  // quando serve davvero uno scatto (vedi requestSnapshot). Appena parte,
+  // la penna martella di dati continui la connessione TCP: se nessuno sta
+  // aspettando un frame, quei dati vanno comunque scartati non appena
+  // arrivano (vedi _handleImageChunk), ma è comunque traffico continuo sul
+  // thread JS. Non è stato osservato nel pcap un comando per fermarla, per
+  // questo il flusso resta "acceso" per tutta la sessione una volta
+  // avviato: motivo in più per ritardarne l'avvio al minimo indispensabile.
   startLiveView() {
+    if (this._liveViewStarted) return;
+    this._liveViewStarted = true;
     this._sendJson({ code: 502, content: { devTarget: this.devId, code: 3 } });
   }
 
   // Richiede uno "snapshot": in realtà si aggancia al flusso di frame JPEG
-  // già in corso (avviato da startLiveView). Per evitare di restituire un
+  // già in corso (avviato qui stesso, in modo lazy, alla prima richiesta —
+  // non più subito dopo la connessione). Per evitare di restituire un
   // frame già a metà ricezione nel momento in cui il comando viene inviato,
   // si aspetta il primo frame la cui ricostruzione INIZIA dopo l'invio del
   // comando 218 (tramite il contatore _frameSeq).
   requestSnapshot(timeoutMs = 8000) {
+    this.startLiveView(); // no-op se già avviata in precedenza
     return new Promise((resolve, reject) => {
       const seqAtRequest = this._frameSeq;
 
@@ -451,6 +477,7 @@ export class NaxclowClient {
   // client per non inondare la UI/bridge RN con troppi aggiornamenti al
   // secondo (i frame reali possono arrivare anche più volte al secondo).
   startLivePreview(onFrame, { minIntervalMs = 800 } = {}) {
+    this.startLiveView(); // no-op se già avviata
     this.stopLivePreview();
     let lastEmit = 0;
     this._livePreviewOff = this.onFrame((frameBuf) => {
