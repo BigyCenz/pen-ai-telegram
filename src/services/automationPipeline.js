@@ -1,6 +1,12 @@
 // Orchestratore del flusso: scatto -> salvataggio locale -> AI -> Telegram.
-// Riceve le dipendenze (client penna + settings) e restituisce funzioni
-// pronte da collegare al trigger del telecomando o al pulsante manuale in UI.
+// Diviso DELIBERATAMENTE in due funzioni separate (invece di un unico
+// blocco monolitico) perché lo scatto deve poter essere visto subito in UI
+// senza aspettare le chiamate di rete verso AI/Telegram, che possono
+// impiegare diversi secondi: il pulsante "Cattura" usa solo
+// captureSnapshot(), un pulsante separato "Avvia" usa sendImageThroughPipeline()
+// sull'immagine già scattata. runCaptureToTelegramFlow() (le due unite in
+// sequenza) resta disponibile per il flusso automatico dal telecomando
+// Bluetooth, dove scatto->AI->Telegram deve avvenire tutto insieme.
 import RNFS from 'react-native-fs';
 import { analyzeImageWithAI } from './aiService';
 import { sendPhotoToTelegram, sendTextToTelegram } from './telegramService';
@@ -11,18 +17,24 @@ async function saveSnapshotToDisk(buffer) {
   return path;
 }
 
-// onStatus è un callback opzionale per aggiornare la UI passo per passo
-// (es. "Scatto in corso...", "Analisi AI...", "Invio a Telegram...").
-export async function runCaptureToTelegramFlow({ naxclowClient, settings, onStatus }) {
+// Scatta e salva SOLO l'immagine: nessuna chiamata di rete verso AI o
+// Telegram. Restituisce il path locale, pensato per essere mostrato subito.
+export async function captureSnapshot({ naxclowClient, onStatus }) {
   const notify = (msg) => onStatus && onStatus(msg);
+  notify('Richiesta snapshot alla penna...');
+  const frameBuffer = await naxclowClient.requestSnapshot();
+  notify('Salvataggio immagine locale...');
+  const imagePath = await saveSnapshotToDisk(frameBuffer);
+  notify('Scatto salvato.');
+  return imagePath;
+}
 
+// Invia un'immagine GIÀ scattata alla AI e poi a Telegram. Separata dallo
+// scatto così può essere avviata da un pulsante distinto, in un momento
+// diverso rispetto al momento dello scatto.
+export async function sendImageThroughPipeline({ imagePath, settings, onStatus }) {
+  const notify = (msg) => onStatus && onStatus(msg);
   try {
-    notify('Richiesta snapshot alla penna...');
-    const frameBuffer = await naxclowClient.requestSnapshot();
-
-    notify('Salvataggio immagine locale...');
-    const imagePath = await saveSnapshotToDisk(frameBuffer);
-
     notify('Analisi con AI...');
     const aiText = await analyzeImageWithAI({
       endpoint: settings.ai.endpoint,
@@ -41,7 +53,7 @@ export async function runCaptureToTelegramFlow({ naxclowClient, settings, onStat
     });
 
     notify('Completato.');
-    return { imagePath, aiText };
+    return aiText;
   } catch (err) {
     notify(`Errore: ${err.message}`);
     // Notifica anche su Telegram in caso di errore, se configurato, così
@@ -59,4 +71,15 @@ export async function runCaptureToTelegramFlow({ naxclowClient, settings, onStat
     }
     throw err;
   }
+}
+
+// onStatus è un callback opzionale per aggiornare la UI passo per passo
+// (es. "Scatto in corso...", "Analisi AI...", "Invio a Telegram...").
+// Usato SOLO per il flusso automatico (telecomando Bluetooth): scatto e
+// invio avvengono in sequenza senza intervento manuale, per riprodurre il
+// comportamento "scatto->AI->Telegram automatico" richiesto in origine.
+export async function runCaptureToTelegramFlow({ naxclowClient, settings, onStatus }) {
+  const imagePath = await captureSnapshot({ naxclowClient, onStatus });
+  const aiText = await sendImageThroughPipeline({ imagePath, settings, onStatus });
+  return { imagePath, aiText };
 }

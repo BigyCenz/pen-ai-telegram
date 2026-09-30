@@ -1,7 +1,11 @@
-// Schermata "Cattura": un solo pulsante grande per scattare manualmente e
-// vedere subito il risultato come prova (immagine + eventuale risposta AI).
-// In uso normale lo scatto arriva dal telecomando Bluetooth (gestito nel
-// Context, non qui), questo pulsante serve per test/verifica manuale.
+// Schermata "Cattura": due azioni volutamente separate, non un unico
+// pulsante che fa tutto insieme.
+//   1) "Cattura" scatta e mostra SOLO la foto, subito, senza aspettare
+//      nessuna chiamata di rete verso AI/Telegram.
+//   2) "Avvia" (compare solo dopo uno scatto) invia quella foto già
+//      visualizzata alla pipeline AI -> Telegram, su azione volontaria.
+// In uso automatico (telecomando Bluetooth) le due cose restano comunque
+// unite in sequenza, gestito nel Context, non in questa schermata.
 import React from 'react';
 import { View, Text, ScrollView, TouchableOpacity, Image, StyleSheet, ActivityIndicator } from 'react-native';
 import Card from '../components/Card';
@@ -11,15 +15,16 @@ import { colors, spacing, typography, radius } from '../theme';
 import { usePenConnection, PEN_STATUS } from '../store/PenConnectionContext';
 
 export default function CaptureScreen({ navigation }) {
-  const { penStatus, capture, captureBusy, lastCapture } = usePenConnection();
+  const { penStatus, capture, captureBusy, sendLastCapture, sendBusy, lastCapture } = usePenConnection();
 
   const connected = penStatus === PEN_STATUS.CONNECTED;
+  const alreadySent = !!lastCapture?.aiText;
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <Text style={typography.title}>Cattura</Text>
       <Text style={[typography.subtitle, { marginTop: 4, marginBottom: spacing(2) }]}>
-        Scatto manuale di prova · in uso normale parte dal telecomando Bluetooth
+        Scatta, controlla la foto, poi avvia l'automazione quando vuoi
       </Text>
 
       <Card>
@@ -54,7 +59,7 @@ export default function CaptureScreen({ navigation }) {
             )}
           </TouchableOpacity>
           <Text style={[typography.subtitle, { marginTop: spacing(1.5), textAlign: 'center' }]}>
-            {captureBusy ? 'Scatto in corso…' : 'Tocca per scattare e avviare la pipeline'}
+            {captureBusy ? 'Scatto in corso…' : 'Tocca per scattare (solo foto, nessun invio)'}
           </Text>
         </Card>
       )}
@@ -63,15 +68,26 @@ export default function CaptureScreen({ navigation }) {
         <Card>
           <SectionHeader title="Ultimo scatto" subtitle={new Date(lastCapture.capturedAt).toLocaleTimeString()} />
           <Image source={{ uri: `file://${lastCapture.imagePath}` }} style={styles.preview} />
-          {lastCapture.aiText ? (
+
+          <TouchableOpacity
+            style={[styles.sendBtn, (sendBusy || alreadySent) && styles.btnDisabled]}
+            onPress={sendLastCapture}
+            disabled={sendBusy || alreadySent}
+          >
+            {sendBusy ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.primaryBtnText}>
+                {alreadySent ? 'Già inviato ✓' : 'Avvia · analizza con AI e invia a Telegram'}
+              </Text>
+            )}
+          </TouchableOpacity>
+
+          {lastCapture.aiText && (
             <View style={styles.aiBox}>
               <Text style={typography.label}>RISPOSTA AI</Text>
               <Text style={[typography.body, { marginTop: 6 }]}>{lastCapture.aiText}</Text>
             </View>
-          ) : (
-            <Text style={[typography.subtitle, { marginTop: spacing(1) }]}>
-              Foto salvata senza automazione (impostazioni AI/Telegram incomplete).
-            </Text>
           )}
         </Card>
       )}
@@ -108,6 +124,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   preview: { width: '100%', height: 260, borderRadius: radius.md, marginTop: spacing(1) },
+  sendBtn: {
+    backgroundColor: colors.success,
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: spacing(1.5),
+  },
+  btnDisabled: { opacity: 0.5 },
   aiBox: {
     marginTop: spacing(1.5),
     padding: spacing(1.5),
