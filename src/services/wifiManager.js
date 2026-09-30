@@ -3,6 +3,7 @@
 // al WiFi della penna ma le richieste internet passano comunque.
 import WifiManager from 'react-native-wifi-reborn';
 import { PermissionsAndroid, Platform, Linking } from 'react-native';
+import { requestCellular, releaseCellular } from '../../modules/cellular-network/src';
 
 // Confermato da cattura reale: la penna V720/Naxclow fa da gateway della
 // propria rete AP a questo indirizzo. Resta comunque configurabile perché
@@ -95,36 +96,59 @@ export async function disconnectFromPen() {
   }
 }
 
-// Esegue una funzione async DOPO aver rilasciato il binding forzato sul
-// WiFi della penna, e lo ri-applica sempre al termine (successo o errore).
+// Esegue una funzione async DOPO aver richiesto esplicitamente la rete
+// dati mobile e bindato il processo a quella (non solo "sciolto" il
+// binding sul WiFi), e ripristina sempre il binding sul WiFi della penna
+// al termine (successo o errore).
 //
-// Perché serve: connectToPen() chiama forceWifiUsageWithOptions(true, ...)
-// per instradare TUTTE le richieste di rete dell'app sul WiFi della penna
-// (necessario per parlare con la penna stessa, che non ha internet). Ma
-// questo blocca anche le chiamate verso servizi esterni (AI, Telegram):
-// restano instradate sulla stessa rete senza internet e vanno in errore
-// (timeout/connection refused), perché il binding forzato via
-// bindProcessToNetwork() vale per TUTTO il processo, non per singola
-// richiesta — non è selettivo tra "traffico verso la penna" e "traffico
-// verso internet".
+// PERCHÉ SERVE UN MODULO NATIVO DEDICATO (storia del bug):
+// connectToPen() chiama forceWifiUsageWithOptions(true, ...) per
+// instradare TUTTE le richieste di rete dell'app sul WiFi della penna
+// (necessario per parlarci, dato che non ha internet). Il primo tentativo
+// di fix chiamava solo releaseWifiForcing() (= bindProcessToNetwork(null))
+// prima delle chiamate esterne, per "lasciare scegliere ad Android".
+// Confermato con una cattura di rete reale (pen3.pcap) che questo NON
+// basta: bindProcessToNetwork(null) scioglie il binding esplicito, ma non
+// rilascia la richiesta di rete WiFi che connectToPen() ha attivato con
+// requestNetwork() — quella richiesta resta viva, e su questo device (e
+// non solo, vedi i molti report simili in giro per bindProcessToNetwork)
+// Android continua comunque a preferire il WiFi per la risoluzione DNS e
+// le connessioni, anche se dichiarato "senza internet". Risultato: la
+// richiesta va in timeout con WiFi acceso, ma funziona subito se il WiFi
+// viene spento manualmente — la prova che il problema era il routing, non
+// il codice della chiamata AI/Telegram in sé.
 //
-// releaseWifiForcing() chiama bindProcessToNetwork(null): sblocca il
-// processo e lascia che Android scelga automaticamente la rete migliore
-// per ogni richiesta (tipicamente la rete dati, dato che il WiFi è
-// dichiarato "senza internet" con noInternet:true in connectToPen). Va
-// però sempre ripristinato il binding sul WiFi dopo, altrimenti la
-// successiva richiesta di scatto alla penna (che parla solo su quella
-// rete IoT) rischia di uscire sulla rete dati invece che sul WiFi.
+// La fix corretta, implementata nel modulo nativo modules/cellular-network:
+// richiede esplicitamente TRANSPORT_CELLULAR con requestNetwork() e, alla
+// callback onAvailable, chiama bindProcessToNetwork(quella rete) — non
+// null. Questo forza davvero le richieste del processo sui dati mobili.
+//
 // ssidPrefix è opzionale: il chiamante lo passa quando conosce il prefisso
 // configurato dall'utente nelle Impostazioni (può differire dal default
 // "Nax_"), così il controllo "sono ancora sulla rete della penna?" sotto è
 // corretto anche con un prefisso personalizzato, non solo con quello di
 // default.
 export async function withMobileNetwork(fn, ssidPrefix) {
-  await releaseWifiForcing();
+  if (Platform.OS !== 'android') {
+    // Il modulo nativo è Android-only (vedi CellularNetworkModule.web.ts,
+    // no-op): su altre piattaforme non c'è il problema di
+    // bindProcessToNetwork legato a questa libreria WiFi.
+    return fn();
+  }
+
+  try {
+    await requestCellular(8000);
+  } catch (e) {
+    console.warn('Impossibile agganciarsi alla rete cellulare esplicitamente, procedo comunque (potrebbe fallire):', e.message);
+    // Non blocchiamo la chiamata: se i dati mobili sono davvero assenti,
+    // fn() fallirà comunque più sotto con un errore di rete chiaro; se
+    // invece erano già disponibili per altri motivi, potrebbe funzionare.
+  }
+
   try {
     return await fn();
   } finally {
+    releaseCellular();
     // Ripristina il forcing sul WiFi SOLO se si è ancora effettivamente
     // connessi a una rete della penna: se nel frattempo l'utente si è
     // disconnesso o è passato ad un'altra rete, ri-forzare instraderebbe

@@ -1,7 +1,13 @@
 node_modules/
 .expo/
 dist/
-android/
-ios/
+# Solo le cartelle android/ios generate in root da `expo prebuild`, NON
+# quelle dentro modules/*/android — quelle sono codice nativo scritto a
+# mano (es. modules/cellular-network) e vanno versionate. "/android/" con
+# lo slash iniziale ancora il pattern alla root del repo; "android/" senza
+# slash avrebbe ignorato qualunque cartella "android" ovunque nell'albero,
+# incluso il codice nativo dei moduli locali.
+/android/
+/ios/
 *.log
 .env
