@@ -1,168 +1,63 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  View,
-  Text,
-  ScrollView,
-  TouchableOpacity,
-  Image,
-  StyleSheet,
-  ActivityIndicator,
-  TextInput,
-} from 'react-native';
+// Schermata "Penna": gestisce SOLO i due passi di connessione, in ordine,
+// separati come richiesto:
+//   1) Stato WiFi: sei sulla rete della penna? Se no, invita a connettersi
+//      (senza nomi hardcoded: scansiona per prefisso o apre le impostazioni
+//      di sistema).
+//   2) Stato sessione penna: una volta sulla rete giusta, un pulsante avvia
+//      la sessione applicativa (discovery + login) e mostra i dati letti
+//      dal device.
+// Lo scatto vero e proprio vive nella tab "Cattura", il log dettagliato
+// nella tab "Log": qui restano solo un riepilogo di stato pensato per
+// essere letto a colpo d'occhio.
+import React, { useEffect, useState } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useSettings } from '../store/SettingsContext';
 import Card from '../components/Card';
+import SectionHeader from '../components/SectionHeader';
+import InfoRow from '../components/InfoRow';
 import StatusBadge from '../components/StatusBadge';
 import { colors, spacing, typography, radius } from '../theme';
-import {
-  ensurePermissions,
-  scanPenNetworks,
-  connectToPen,
-  disconnectFromPen,
-  DEFAULT_PEN_IP,
-} from '../services/wifiManager';
-import { NaxclowClient, discoverDevice, extractDevIdFromSsid } from '../services/naxclowClient';
-import { startRemoteListener, stopRemoteListener } from '../services/bluetoothRemoteListener';
-import { runCaptureToTelegramFlow } from '../services/automationPipeline';
-import { validateSettings } from '../services/settingsValidation';
+import { usePenConnection, WIFI_STATUS, PEN_STATUS } from '../store/PenConnectionContext';
 
 export default function HomeScreen({ navigation }) {
-  const { settings } = useSettings();
-  const [connState, setConnState] = useState('idle'); // idle | connecting | connected | error
+  const {
+    wifiStatus,
+    currentSsid,
+    wifiBusy,
+    permissionIssue,
+    ssidPrefix,
+    refreshWifiStatus,
+    scanForPenNetworks,
+    joinPenNetwork,
+    penStatus,
+    penInfo,
+    penError,
+    connectPenSession,
+    disconnectPenSession,
+  } = usePenConnection();
+
   const [networks, setNetworks] = useState([]);
-  const [manualSsid, setManualSsid] = useState('Nax_22C160004AFB');
-  const [log, setLog] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [lastImage, setLastImage] = useState(null);
-  const [lastAiText, setLastAiText] = useState(null);
-  const [liveFrameUri, setLiveFrameUri] = useState(null);
-  const [liveOn, setLiveOn] = useState(false);
+  const [scanning, setScanning] = useState(false);
 
-  const clientRef = useRef(null);
-
-  const pushLog = useCallback((msg) => {
-    setLog((prev) => [...prev.slice(-40), `${new Date().toLocaleTimeString()}  ${msg}`]);
-  }, []);
-
-  const [scanPermIssue, setScanPermIssue] = useState(null);
+  // Con la tab bar in uso ogni schermata viene rimontata a ogni cambio
+  // tab (non resta "in pausa" come con uno Stack Navigator), quindi un
+  // semplice effetto al mount basta per aggiornare lo stato WiFi ogni
+  // volta che l'utente torna su questa sezione.
+  useEffect(() => {
+    refreshWifiStatus();
+  }, [refreshWifiStatus]);
 
   const handleScan = async () => {
-    setScanPermIssue(null);
-    const perm = await ensurePermissions();
-    if (!perm.ok) {
-      pushLog(perm.reason || 'Permessi WiFi non concessi');
-      if (perm.openSettings) setScanPermIssue(perm);
-      return;
-    }
-    pushLog('Scansione reti WiFi...');
+    setScanning(true);
     try {
-      const list = await scanPenNetworks(settings.pen.ssidPrefix);
+      const list = await scanForPenNetworks();
       setNetworks(list);
-      pushLog(`Trovate ${list.length} reti compatibili`);
-    } catch (e) {
-      pushLog(`Scansione fallita: ${e.message}. Puoi comunque connetterti inserendo il nome della rete a mano qui sotto.`);
-    }
-  };
-
-  const doConnect = async (ssid, password = null) => {
-    const deviceIp = settings.pen.ip || DEFAULT_PEN_IP;
-    try {
-      setConnState('connecting');
-      pushLog(`Connessione WiFi a ${ssid}...`);
-      await connectToPen(ssid, password);
-
-      // La discovery del devId (frame type=114 su una connessione TCP a se
-      // stante) è più affidabile del pattern SSID: va tentata prima, con
-      // fallback sul nome della rete se il device non risponde.
-      let devId = null;
-      try {
-        pushLog('Richiesta devId alla penna (discovery)...');
-        const info = await discoverDevice({ deviceIp });
-        devId = info.devId;
-        pushLog(`Penna identificata: ${info.devName || devId} (batteria ${info.battery ?? '?'}%)`);
-      } catch (e) {
-        devId = extractDevIdFromSsid(ssid);
-        pushLog(`Discovery non riuscita (${e.message}), uso il devId dedotto dal SSID: ${devId || 'non determinato'}`);
-      }
-
-      const client = new NaxclowClient({ deviceIp, ssid, devId });
-      pushLog(`Apertura connessione TCP a ${deviceIp}:6123...`);
-      await client.connect();
-
-      pushLog('Login sulla penna...');
-      await client.login();
-
-      const status = await client.queryStatus();
-      if (status) {
-        pushLog(`Stato penna: batteria ${status.devPower ?? '?'}%, wifi "${status.wifiName ?? '?'}", fw ${status.version ?? '?'}`);
-      }
-
-      client.startLiveView();
-      clientRef.current = client;
-
-      setConnState('connected');
-      pushLog('Connesso e autenticato.');
-
-      startRemoteListener(settings.remote.triggerKeyCode, handleTrigger);
-      pushLog('Telecomando BT in ascolto.');
-
-      client.startLivePreview((frameBuffer) => {
-        setLiveFrameUri(`data:image/jpeg;base64,${frameBuffer.toString('base64')}`);
-      });
-      setLiveOn(true);
-    } catch (e) {
-      setConnState('error');
-      pushLog(`Errore connessione: ${e.message}`);
-    }
-  };
-
-  const handleDisconnect = async () => {
-    stopRemoteListener();
-    if (clientRef.current) clientRef.current.close();
-    setLiveOn(false);
-    setLiveFrameUri(null);
-    await disconnectFromPen();
-    setConnState('idle');
-    pushLog('Disconnesso.');
-  };
-
-  const handleTrigger = useCallback(async () => {
-    if (busy || !clientRef.current) return;
-
-    const { valid, problems } = validateSettings(settings);
-    if (!valid) {
-      pushLog(`Impostazioni incomplete: ${problems.join(', ')}`);
-      return;
-    }
-
-    setBusy(true);
-    clientRef.current.stopLivePreview();
-    try {
-      const result = await runCaptureToTelegramFlow({
-        naxclowClient: clientRef.current,
-        settings,
-        onStatus: pushLog,
-      });
-      setLastImage(result.imagePath);
-      setLastAiText(result.aiText);
-    } catch (e) {
-      // già loggato dentro la pipeline
     } finally {
-      setBusy(false);
-      if (clientRef.current && liveOn) {
-        clientRef.current.startLivePreview((frameBuffer) => {
-          setLiveFrameUri(`data:image/jpeg;base64,${frameBuffer.toString('base64')}`);
-        });
-      }
+      setScanning(false);
     }
-  }, [busy, settings, pushLog, liveOn]);
+  };
 
-  useEffect(() => {
-    return () => {
-      stopRemoteListener();
-      if (clientRef.current) clientRef.current.close();
-    };
-  }, []);
+  const onWifiCardConnected = wifiStatus === WIFI_STATUS.PEN_NETWORK;
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -173,130 +68,133 @@ export default function HomeScreen({ navigation }) {
         style={styles.header}
       >
         <Text style={styles.headerTitle}>Pen AI → Telegram</Text>
-        <Text style={styles.headerSubtitle}>Scatto dalla penna · analisi AI · invio automatico</Text>
+        <Text style={styles.headerSubtitle}>Connessione alla penna, passo per passo</Text>
       </LinearGradient>
 
+      {/* STEP 1: rete WiFi */}
       <Card>
-        <StatusBadge variant={connState} />
-        <View style={{ height: spacing(2) }} />
-
-        {connState !== 'connected' ? (
-          <>
-            <Text style={typography.label}>CONNETTI ALLA PENNA</Text>
-            <View style={{ height: 8 }} />
-            <TextInput
-              style={styles.ssidInput}
-              value={manualSsid}
-              onChangeText={setManualSsid}
-              placeholder="Nome rete penna (SSID)"
-              placeholderTextColor={colors.textDim}
-              autoCapitalize="none"
-              autoCorrect={false}
+        <SectionHeader
+          title="1 · Rete WiFi"
+          subtitle="La penna crea una rete propria a cui il telefono deve associarsi"
+          right={
+            <StatusBadge
+              variant={onWifiCardConnected ? 'connected' : 'idle'}
+              text={onWifiCardConnected ? 'Rete penna' : 'Non connesso'}
             />
-            <TouchableOpacity
-              style={[styles.primaryBtn, { marginTop: spacing(1.5) }]}
-              onPress={() => doConnect(manualSsid)}
-            >
-              <Text style={styles.primaryBtnText}>Connetti a "{manualSsid}"</Text>
+          }
+        />
+
+        {currentSsid ? (
+          <Text style={[typography.body, { marginBottom: spacing(1) }]}>
+            Rete attuale: <Text style={{ fontWeight: '700' }}>{currentSsid}</Text>
+          </Text>
+        ) : (
+          <Text style={[typography.subtitle, { marginBottom: spacing(1) }]}>
+            Nessuna rete WiFi rilevata (o permessi non concessi).
+          </Text>
+        )}
+
+        {!onWifiCardConnected && (
+          <>
+            <Text style={[typography.subtitle, { marginBottom: spacing(1.5) }]}>
+              Connettiti a una rete che inizia con "{ssidPrefix}" (il prefisso è configurabile nelle Impostazioni).
+            </Text>
+
+            <TouchableOpacity style={styles.primaryBtn} onPress={handleScan} disabled={scanning}>
+              {scanning ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.primaryBtnText}>Cerca reti della penna</Text>
+              )}
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.secondaryBtn} onPress={handleScan}>
-              <Text style={styles.secondaryBtnText}>oppure cerca reti disponibili</Text>
-            </TouchableOpacity>
-            {scanPermIssue && (
-              <TouchableOpacity style={styles.secondaryBtn} onPress={scanPermIssue.openSettings}>
+            {networks.length > 0 && (
+              <View style={{ marginTop: spacing(1.5) }}>
+                {networks.map((n) => (
+                  <TouchableOpacity
+                    key={n.BSSID || n.SSID}
+                    style={styles.networkRow}
+                    onPress={() => joinPenNetwork(n.SSID)}
+                    disabled={wifiBusy}
+                  >
+                    <Text style={typography.body}>{n.SSID}</Text>
+                    <Text style={typography.subtitle}>Connetti →</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
+            {permissionIssue && (
+              <TouchableOpacity
+                style={[styles.secondaryBtn, { marginTop: spacing(1) }]}
+                onPress={permissionIssue.openSettings}
+              >
                 <Text style={[styles.secondaryBtnText, { color: colors.warning }]}>
-                  Permesso bloccato · apri impostazioni app
+                  {permissionIssue.reason} · Apri impostazioni
                 </Text>
               </TouchableOpacity>
             )}
+
+            <TouchableOpacity style={styles.secondaryBtn} onPress={refreshWifiStatus}>
+              <Text style={styles.secondaryBtnText}>Mi sono già connesso dalle impostazioni · aggiorna stato</Text>
+            </TouchableOpacity>
           </>
-        ) : (
-          <TouchableOpacity style={styles.dangerBtn} onPress={handleDisconnect}>
-            <Text style={styles.primaryBtnText}>Disconnetti</Text>
-          </TouchableOpacity>
         )}
       </Card>
 
-      {networks.length > 0 && connState !== 'connected' && (
-        <Card>
-          <Text style={typography.label}>RETI TROVATE</Text>
-          {networks.map((n) => (
-            <TouchableOpacity
-              key={n.BSSID || n.SSID}
-              style={styles.networkRow}
-              onPress={() => doConnect(n.SSID)}
-            >
-              <Text style={typography.body}>{n.SSID}</Text>
-              <Text style={typography.subtitle}>Connetti →</Text>
-            </TouchableOpacity>
-          ))}
-        </Card>
-      )}
-
-      {connState === 'connected' && (
-        <Card>
-          <View style={styles.liveHeaderRow}>
-            <Text style={typography.label}>ANTEPRIMA LIVE</Text>
-            {liveOn && (
-              <View style={styles.liveDotRow}>
-                <View style={styles.liveDot} />
-                <Text style={styles.liveDotText}>LIVE</Text>
-              </View>
-            )}
-          </View>
-          <View style={{ height: spacing(1) }} />
-          <View style={styles.liveBox}>
-            {liveFrameUri ? (
-              <Image source={{ uri: liveFrameUri }} style={styles.liveImage} resizeMode="cover" />
-            ) : (
-              <ActivityIndicator color={colors.primary} />
-            )}
-          </View>
-        </Card>
-      )}
-
-      {connState === 'connected' && (
-        <Card>
-          <Text style={typography.label}>SCATTO MANUALE (TEST)</Text>
-          <View style={{ height: spacing(1) }} />
-          <TouchableOpacity
-            style={[styles.primaryBtn, busy && styles.btnDisabled]}
-            onPress={handleTrigger}
-            disabled={busy}
-          >
-            {busy ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.primaryBtnText}>Scatta e invia ora</Text>
-            )}
-          </TouchableOpacity>
-          <Text style={[typography.subtitle, { marginTop: spacing(1) }]}>
-            In uso normale, lo scatto parte dal telecomando Bluetooth
-          </Text>
-        </Card>
-      )}
-
-      {lastImage && (
-        <Card>
-          <Text style={typography.label}>ULTIMO SCATTO INVIATO</Text>
-          <Image source={{ uri: `file://${lastImage}` }} style={styles.preview} />
-          {lastAiText && <Text style={[typography.body, { marginTop: spacing(1) }]}>{lastAiText}</Text>}
-        </Card>
-      )}
-
+      {/* STEP 2: sessione applicativa penna */}
       <Card>
-        <Text style={typography.label}>LOG</Text>
-        <View style={{ height: spacing(1) }} />
-        {log.length === 0 && <Text style={typography.subtitle}>Nessun evento ancora</Text>}
-        {log.map((l, i) => (
-          <Text key={i} style={typography.mono}>{l}</Text>
-        ))}
+        <SectionHeader
+          title="2 · Sessione penna"
+          subtitle="Login e lettura dati dal device"
+          right={
+            <StatusBadge
+              variant={penStatus === PEN_STATUS.CONNECTED ? 'connected' : penStatus === PEN_STATUS.CONNECTING ? 'connecting' : penStatus === PEN_STATUS.ERROR ? 'error' : 'idle'}
+            />
+          }
+        />
+
+        {!onWifiCardConnected ? (
+          <Text style={typography.subtitle}>Completa prima il passo 1: connettiti alla rete della penna.</Text>
+        ) : penStatus === PEN_STATUS.CONNECTED ? (
+          <>
+            <InfoRow label="Modello" value={penInfo?.devModel} />
+            <InfoRow label="Nome device" value={penInfo?.devName} />
+            <InfoRow label="Device ID" value={penInfo?.devId} />
+            <InfoRow label="Batteria" value={penInfo?.battery != null ? `${penInfo.battery}%` : null} />
+            <InfoRow label="Firmware" value={penInfo?.firmwareVersion} />
+            <InfoRow label="WiFi penna" value={penInfo?.wifiName} />
+
+            <TouchableOpacity style={[styles.dangerBtn, { marginTop: spacing(2) }]} onPress={disconnectPenSession}>
+              <Text style={styles.primaryBtnText}>Termina sessione</Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          <>
+            <TouchableOpacity
+              style={[styles.primaryBtn, penStatus === PEN_STATUS.CONNECTING && styles.btnDisabled]}
+              onPress={connectPenSession}
+              disabled={penStatus === PEN_STATUS.CONNECTING}
+            >
+              {penStatus === PEN_STATUS.CONNECTING ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.primaryBtnText}>Connetti alla penna</Text>
+              )}
+            </TouchableOpacity>
+            {penError && <Text style={[typography.subtitle, { color: colors.danger, marginTop: spacing(1) }]}>{penError}</Text>}
+          </>
+        )}
       </Card>
 
-      <TouchableOpacity style={styles.settingsLink} onPress={() => navigation.navigate('Settings')}>
-        <Text style={{ color: colors.primary, fontWeight: '600' }}>Impostazioni →</Text>
-      </TouchableOpacity>
+      {penStatus === PEN_STATUS.CONNECTED && (
+        <Card>
+          <SectionHeader title="Pronto" subtitle="Vai alla sezione Cattura per scattare, o usa il telecomando Bluetooth" />
+          <TouchableOpacity style={styles.secondaryFilledBtn} onPress={() => navigation.navigate('Capture')}>
+            <Text style={styles.primaryBtnText}>Vai a Cattura →</Text>
+          </TouchableOpacity>
+        </Card>
+      )}
     </ScrollView>
   );
 }
@@ -317,6 +215,12 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     alignItems: 'center',
   },
+  secondaryFilledBtn: {
+    backgroundColor: colors.primaryDim,
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
   secondaryBtn: { alignItems: 'center', paddingVertical: 10, marginTop: 4 },
   secondaryBtnText: { color: colors.textDim, fontSize: 13, textDecorationLine: 'underline' },
   dangerBtn: {
@@ -327,16 +231,6 @@ const styles = StyleSheet.create({
   },
   btnDisabled: { opacity: 0.6 },
   primaryBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
-  ssidInput: {
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: colors.text,
-    fontSize: 15,
-  },
   networkRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -344,19 +238,4 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
-  liveHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  liveDotRow: { flexDirection: 'row', alignItems: 'center' },
-  liveDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.danger, marginRight: 5 },
-  liveDotText: { color: colors.danger, fontSize: 12, fontWeight: '700' },
-  liveBox: {
-    height: 240,
-    borderRadius: radius.md,
-    backgroundColor: colors.surfaceAlt,
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-  },
-  liveImage: { width: '100%', height: '100%' },
-  preview: { width: '100%', height: 220, borderRadius: radius.md, marginTop: spacing(1) },
-  settingsLink: { alignItems: 'center', marginTop: spacing(2) },
 });

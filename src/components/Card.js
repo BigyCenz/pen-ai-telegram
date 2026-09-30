@@ -1,9 +1,9 @@
 import React from 'react';
 import { View, StyleSheet } from 'react-native';
-import { colors, radius, spacing } from '../theme';
+import { colors, radius, spacing, shadow } from '../theme';
 
-export default function Card({ children, style }) {
-  return <View style={[styles.card, style]}>{children}</View>;
+export default function Card({ children, style, elevated = true }) {
+  return <View style={[styles.card, elevated && shadow, style]}>{children}</View>;
 }
 
 const styles = StyleSheet.create({
