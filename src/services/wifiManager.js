@@ -95,6 +95,51 @@ export async function disconnectFromPen() {
   }
 }
 
+// Esegue una funzione async DOPO aver rilasciato il binding forzato sul
+// WiFi della penna, e lo ri-applica sempre al termine (successo o errore).
+//
+// Perché serve: connectToPen() chiama forceWifiUsageWithOptions(true, ...)
+// per instradare TUTTE le richieste di rete dell'app sul WiFi della penna
+// (necessario per parlare con la penna stessa, che non ha internet). Ma
+// questo blocca anche le chiamate verso servizi esterni (AI, Telegram):
+// restano instradate sulla stessa rete senza internet e vanno in errore
+// (timeout/connection refused), perché il binding forzato via
+// bindProcessToNetwork() vale per TUTTO il processo, non per singola
+// richiesta — non è selettivo tra "traffico verso la penna" e "traffico
+// verso internet".
+//
+// releaseWifiForcing() chiama bindProcessToNetwork(null): sblocca il
+// processo e lascia che Android scelga automaticamente la rete migliore
+// per ogni richiesta (tipicamente la rete dati, dato che il WiFi è
+// dichiarato "senza internet" con noInternet:true in connectToPen). Va
+// però sempre ripristinato il binding sul WiFi dopo, altrimenti la
+// successiva richiesta di scatto alla penna (che parla solo su quella
+// rete IoT) rischia di uscire sulla rete dati invece che sul WiFi.
+// ssidPrefix è opzionale: il chiamante lo passa quando conosce il prefisso
+// configurato dall'utente nelle Impostazioni (può differire dal default
+// "Nax_"), così il controllo "sono ancora sulla rete della penna?" sotto è
+// corretto anche con un prefisso personalizzato, non solo con quello di
+// default.
+export async function withMobileNetwork(fn, ssidPrefix) {
+  await releaseWifiForcing();
+  try {
+    return await fn();
+  } finally {
+    // Ripristina il forcing sul WiFi SOLO se si è ancora effettivamente
+    // connessi a una rete della penna: se nel frattempo l'utente si è
+    // disconnesso o è passato ad un'altra rete, ri-forzare instraderebbe
+    // di nuovo tutto lì senza motivo (o peggio, su una rete sbagliata).
+    try {
+      const ssid = await getCurrentSSID();
+      if (isPenNetwork(ssid, ssidPrefix)) {
+        await WifiManager.forceWifiUsageWithOptions(true, { noInternet: true });
+      }
+    } catch (e) {
+      console.warn('Errore ripristino routing WiFi verso la penna', e);
+    }
+  }
+}
+
 // Prefisso di default della famiglia di penne "Naxclow"/weihome: NON è il
 // nome specifico di un singolo dispositivo, solo il pattern comune usato
 // per riconoscere la rete giusta durante lo scan (resta configurabile

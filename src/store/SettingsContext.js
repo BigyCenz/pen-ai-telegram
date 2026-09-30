@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { guessProviderFromEndpoint } from '../services/aiProviders';
 
 const STORAGE_KEY = '@pen_ai_telegram_settings_v1';
 
@@ -12,6 +13,7 @@ const DEFAULT_SETTINGS = {
     protocol: 'naxclow-v720', // 'naxclow-v720' | 'tutk-iotc' (per penne tipo weihome)
   },
   ai: {
+    provider: 'anthropic', // 'anthropic' | 'openai' | 'gemini' (vedi aiProviders.js)
     endpoint: 'https://api.anthropic.com/v1/messages',
     apiKey: '',
     model: 'claude-sonnet-4-6',
@@ -38,6 +40,14 @@ export function SettingsProvider({ children }) {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
         if (raw) {
           const parsed = JSON.parse(raw);
+          // Retro-compatibilità: impostazioni salvate da una versione
+          // precedente dell'app non hanno ancora ai.provider (introdotto
+          // per la selezione multi-provider). Lo deduciamo dall'endpoint
+          // già salvato, così l'utente non si ritrova improvvisamente con
+          // un provider sbagliato/vuoto senza aver cambiato nulla.
+          if (parsed.ai && !parsed.ai.provider) {
+            parsed.ai.provider = guessProviderFromEndpoint(parsed.ai.endpoint);
+          }
           setSettings((prev) => ({ ...prev, ...parsed }));
         }
       } catch (e) {
