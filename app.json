@@ -5,6 +5,11 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "backgroundColor": "#0F1115",
+      "resizeMode": "contain"
+    },
     "plugins": ["expo-dev-client", "react-native-wifi-reborn"],
     "android": {
       "package": "com.michele.penaitelegram",
