@@ -114,7 +114,13 @@ class CellularNetworkModule : Module() {
     // che parla solo sulla sua rete WiFi, non finisce accidentalmente
     // instradata sui dati mobili).
     Function("releaseCellular") {
-      val cm = connectivityManager ?: return@Function
+      // Il blocco passato a Function() deve restituire esplicitamente un
+      // valore di tipo Any? su ogni percorso, incluso il return anticipato:
+      // "?: return@Function" da solo (senza valore) non type-checka in
+      // questo contesto — va sempre dato un valore esplicito. Pattern
+      // "?: return@Function null" confermato nel codice sorgente reale di
+      // expo-modules-core (es. CoreModule.kt) per lo stesso identico caso.
+      val cm = connectivityManager ?: return@Function null
       releaseActiveCallback(cm)
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
         cm.bindProcessToNetwork(null)
@@ -122,6 +128,7 @@ class CellularNetworkModule : Module() {
         @Suppress("DEPRECATION")
         ConnectivityManager.setProcessDefaultNetwork(null)
       }
+      null
     }
   }
 
