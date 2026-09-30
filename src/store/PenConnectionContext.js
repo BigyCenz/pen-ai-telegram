@@ -13,7 +13,6 @@
 // da "la penna ha accettato la sessione?".
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
-import RNFS from 'react-native-fs';
 import {
   ensurePermissions,
   getCurrentSSID,
@@ -26,7 +25,7 @@ import {
 } from '../services/wifiManager';
 import { NaxclowClient, discoverDevice, extractDevIdFromSsid } from '../services/naxclowClient';
 import { startRemoteListener, stopRemoteListener } from '../services/bluetoothRemoteListener';
-import { runCaptureToTelegramFlow } from '../services/automationPipeline';
+import { captureSnapshot, sendImageThroughPipeline, runCaptureToTelegramFlow } from '../services/automationPipeline';
 import { validateSettings } from '../services/settingsValidation';
 import { useSettings } from './SettingsContext';
 
@@ -60,6 +59,7 @@ export function PenConnectionProvider({ children }) {
   const [penError, setPenError] = useState(null);
 
   const [captureBusy, setCaptureBusy] = useState(false);
+  const [sendBusy, setSendBusy] = useState(false);
   const [lastCapture, setLastCapture] = useState(null); // { imagePath, aiText, capturedAt }
 
   const [log, setLog] = useState([]);
@@ -229,9 +229,10 @@ export function PenConnectionProvider({ children }) {
     setPenError(null);
   }, [pushLog]);
 
-  // Scatto + pipeline AI/Telegram: unica funzione condivisa sia dal
-  // pulsante "Cattura" in UI, sia dal telecomando Bluetooth, così il
-  // comportamento è identico indipendentemente dal trigger.
+  // SOLO scatto: nessuna chiamata di rete verso AI/Telegram, così il
+  // pulsante "Cattura" in UI mostra subito la foto senza aspettare
+  // chiamate di rete lente. L'avvio della pipeline è un'azione separata
+  // (vedi sendLastCapture), su richiesta esplicita dell'utente.
   const capture = useCallback(async () => {
     const client = clientRef.current;
     if (!client || penStatus !== PEN_STATUS.CONNECTED) {
@@ -240,34 +241,77 @@ export function PenConnectionProvider({ children }) {
     }
     if (captureBusy) return null;
 
-    const { valid, problems } = validateSettings(settings);
     setCaptureBusy(true);
     try {
-      if (!valid) {
-        pushLog(`Attenzione: impostazioni AI/Telegram incomplete (${problems.join(', ')}). Scatto solo la foto, senza automazione.`);
-        const frameBuffer = await client.requestSnapshot();
-        const path = `${RNFS.CachesDirectoryPath}/snapshot_${Date.now()}.jpg`;
-        await RNFS.writeFile(path, frameBuffer.toString('base64'), 'base64');
-        const result = { imagePath: path, aiText: null, capturedAt: Date.now() };
-        setLastCapture(result);
-        return result;
-      }
-
-      const result = await runCaptureToTelegramFlow({ naxclowClient: client, settings, onStatus: pushLog });
-      const withTimestamp = { ...result, capturedAt: Date.now() };
-      setLastCapture(withTimestamp);
-      return withTimestamp;
+      const imagePath = await captureSnapshot({ naxclowClient: client, onStatus: pushLog });
+      const result = { imagePath, aiText: null, capturedAt: Date.now() };
+      setLastCapture(result);
+      return result;
     } catch (e) {
-      // già loggato dentro la pipeline/snapshot
+      // già loggato dentro captureSnapshot
       return null;
     } finally {
       setCaptureBusy(false);
     }
-  }, [penStatus, captureBusy, settings, pushLog]);
+  }, [penStatus, captureBusy, pushLog]);
+
+  // Avvia la pipeline AI/Telegram sull'ultimo scatto già visualizzato.
+  // Azione separata e volontaria, innescata da un secondo pulsante in UI.
+  const sendLastCapture = useCallback(async () => {
+    if (!lastCapture || sendBusy) return null;
+
+    const { valid, problems } = validateSettings(settings);
+    if (!valid) {
+      pushLog(`Impossibile avviare: impostazioni AI/Telegram incomplete (${problems.join(', ')}).`);
+      return null;
+    }
+
+    setSendBusy(true);
+    try {
+      const aiText = await sendImageThroughPipeline({ imagePath: lastCapture.imagePath, settings, onStatus: pushLog });
+      setLastCapture((prev) => (prev ? { ...prev, aiText } : prev));
+      return aiText;
+    } catch (e) {
+      // già loggato dentro sendImageThroughPipeline
+      return null;
+    } finally {
+      setSendBusy(false);
+    }
+  }, [lastCapture, sendBusy, settings, pushLog]);
+
+  // Flusso automatico completo (scatto->AI->Telegram in un colpo), usato
+  // SOLO dal telecomando Bluetooth: lì non c'è una UI passo-passo da
+  // aspettare, quindi l'automazione end-to-end resta quella richiesta in
+  // origine per l'uso "sul campo".
+  const captureFromRemote = useCallback(async () => {
+    const client = clientRef.current;
+    if (!client || penStatus !== PEN_STATUS.CONNECTED) {
+      pushLog('Scatto da telecomando ignorato: nessuna sessione penna attiva.');
+      return;
+    }
+    if (captureBusy || sendBusy) return;
+
+    const { valid, problems } = validateSettings(settings);
+    setCaptureBusy(true);
+    try {
+      if (!valid) {
+        pushLog(`Impostazioni AI/Telegram incomplete (${problems.join(', ')}): scatto solo la foto.`);
+        const imagePath = await captureSnapshot({ naxclowClient: client, onStatus: pushLog });
+        setLastCapture({ imagePath, aiText: null, capturedAt: Date.now() });
+        return;
+      }
+      const result = await runCaptureToTelegramFlow({ naxclowClient: client, settings, onStatus: pushLog });
+      setLastCapture({ ...result, capturedAt: Date.now() });
+    } catch (e) {
+      // già loggato dentro la pipeline
+    } finally {
+      setCaptureBusy(false);
+    }
+  }, [penStatus, captureBusy, sendBusy, settings, pushLog]);
 
   useEffect(() => {
-    captureRef.current = capture;
-  }, [capture]);
+    captureRef.current = captureFromRemote;
+  }, [captureFromRemote]);
 
   useEffect(() => {
     if (penStatus === PEN_STATUS.CONNECTED) {
@@ -312,6 +356,8 @@ export function PenConnectionProvider({ children }) {
     // cattura + automazione
     capture,
     captureBusy,
+    sendLastCapture,
+    sendBusy,
     lastCapture,
     // log condiviso
     log,
