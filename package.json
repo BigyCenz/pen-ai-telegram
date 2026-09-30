@@ -21,6 +21,7 @@
     "@react-native-async-storage/async-storage": "1.23.1",
     "react-native-wifi-reborn": "^4.11.0",
     "react-native-tcp-socket": "^6.2.0",
+    "buffer": "^6.0.3",
     "react-native-keyevent": "*",
     "react-native-fs": "^2.20.0"
   },
