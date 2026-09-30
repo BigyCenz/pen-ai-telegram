@@ -10,6 +10,7 @@
 import RNFS from 'react-native-fs';
 import { analyzeImageWithAI } from './aiService';
 import { sendPhotoToTelegram, sendTextToTelegram } from './telegramService';
+import { withMobileNetwork } from './wifiManager';
 
 async function saveSnapshotToDisk(buffer) {
   const path = `${RNFS.CachesDirectoryPath}/snapshot_${Date.now()}.jpg`;
@@ -32,25 +33,42 @@ export async function captureSnapshot({ naxclowClient, onStatus }) {
 // Invia un'immagine GIÀ scattata alla AI e poi a Telegram. Separata dallo
 // scatto così può essere avviata da un pulsante distinto, in un momento
 // diverso rispetto al momento dello scatto.
+// Tutte le chiamate di rete verso servizi esterni (AI, Telegram) sono
+// avvolte in withMobileNetwork(): mentre il telefono è connesso al WiFi
+// della penna, quel WiFi viene forzato come rotta di rete per l'intero
+// processo (vedi wifiManager.connectToPen) perché è l'unico modo per
+// parlare con la penna stessa (che non ha internet). Senza questo
+// wrapper, le richieste verso AI/Telegram uscirebbero sulla stessa rete
+// senza internet e fallirebbero con errori di rete generici, anche con
+// dati mobili o altre reti disponibili e funzionanti.
 export async function sendImageThroughPipeline({ imagePath, settings, onStatus }) {
   const notify = (msg) => onStatus && onStatus(msg);
   try {
     notify('Analisi con AI...');
-    const aiText = await analyzeImageWithAI({
-      endpoint: settings.ai.endpoint,
-      apiKey: settings.ai.apiKey,
-      model: settings.ai.model,
-      prompt: settings.ai.prompt,
-      imagePath,
-    });
+    const aiText = await withMobileNetwork(
+      () =>
+        analyzeImageWithAI({
+          endpoint: settings.ai.endpoint,
+          apiKey: settings.ai.apiKey,
+          provider: settings.ai.provider,
+          model: settings.ai.model,
+          prompt: settings.ai.prompt,
+          imagePath,
+        }),
+      settings.pen.ssidPrefix
+    );
 
     notify('Invio a Telegram...');
-    await sendPhotoToTelegram({
-      botToken: settings.telegram.botToken,
-      chatId: settings.telegram.chatId,
-      imagePath,
-      caption: aiText,
-    });
+    await withMobileNetwork(
+      () =>
+        sendPhotoToTelegram({
+          botToken: settings.telegram.botToken,
+          chatId: settings.telegram.chatId,
+          imagePath,
+          caption: aiText,
+        }),
+      settings.pen.ssidPrefix
+    );
 
     notify('Completato.');
     return aiText;
@@ -60,11 +78,15 @@ export async function sendImageThroughPipeline({ imagePath, settings, onStatus }
     // l'utente lo sa anche se non ha il telefono sotto controllo.
     if (settings.telegram.botToken && settings.telegram.chatId) {
       try {
-        await sendTextToTelegram({
-          botToken: settings.telegram.botToken,
-          chatId: settings.telegram.chatId,
-          text: `⚠️ Errore automazione penna: ${err.message}`,
-        });
+        await withMobileNetwork(
+          () =>
+            sendTextToTelegram({
+              botToken: settings.telegram.botToken,
+              chatId: settings.telegram.chatId,
+              text: `⚠️ Errore automazione penna: ${err.message}`,
+            }),
+          settings.pen.ssidPrefix
+        );
       } catch (_) {
         // se anche Telegram fallisce non c'è molto altro da fare qui
       }
