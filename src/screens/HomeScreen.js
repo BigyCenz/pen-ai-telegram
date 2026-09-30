@@ -21,7 +21,7 @@ import {
   disconnectFromPen,
   DEFAULT_PEN_IP,
 } from '../services/wifiManager';
-import { NaxclowClient } from '../services/naxclowClient';
+import { NaxclowClient, discoverDevice, extractDevIdFromSsid } from '../services/naxclowClient';
 import { startRemoteListener, stopRemoteListener } from '../services/bluetoothRemoteListener';
 import { runCaptureToTelegramFlow } from '../services/automationPipeline';
 import { validateSettings } from '../services/settingsValidation';
@@ -65,17 +65,37 @@ export default function HomeScreen({ navigation }) {
   };
 
   const doConnect = async (ssid, password = null) => {
+    const deviceIp = settings.pen.ip || DEFAULT_PEN_IP;
     try {
       setConnState('connecting');
       pushLog(`Connessione WiFi a ${ssid}...`);
       await connectToPen(ssid, password);
 
-      const client = new NaxclowClient({ deviceIp: settings.pen.ip || DEFAULT_PEN_IP, ssid });
-      pushLog(`Apertura connessione TCP a ${settings.pen.ip || DEFAULT_PEN_IP}:6123...`);
+      // La discovery del devId (frame type=114 su una connessione TCP a se
+      // stante) è più affidabile del pattern SSID: va tentata prima, con
+      // fallback sul nome della rete se il device non risponde.
+      let devId = null;
+      try {
+        pushLog('Richiesta devId alla penna (discovery)...');
+        const info = await discoverDevice({ deviceIp });
+        devId = info.devId;
+        pushLog(`Penna identificata: ${info.devName || devId} (batteria ${info.battery ?? '?'}%)`);
+      } catch (e) {
+        devId = extractDevIdFromSsid(ssid);
+        pushLog(`Discovery non riuscita (${e.message}), uso il devId dedotto dal SSID: ${devId || 'non determinato'}`);
+      }
+
+      const client = new NaxclowClient({ deviceIp, ssid, devId });
+      pushLog(`Apertura connessione TCP a ${deviceIp}:6123...`);
       await client.connect();
 
       pushLog('Login sulla penna...');
       await client.login();
+
+      const status = await client.queryStatus();
+      if (status) {
+        pushLog(`Stato penna: batteria ${status.devPower ?? '?'}%, wifi "${status.wifiName ?? '?'}", fw ${status.version ?? '?'}`);
+      }
 
       client.startLiveView();
       clientRef.current = client;
