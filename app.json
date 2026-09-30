@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "PenAI-Telegram",
+    "slug": "pen-ai-telegram",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "plugins": ["expo-dev-client", "react-native-wifi-reborn"],
+    "android": {
+      "package": "com.michele.penaitelegram",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_STATE",
+        "ACCESS_NETWORK_STATE",
+        "CHANGE_NETWORK_STATE",
+        "NEARBY_WIFI_DEVICES",
+        "INTERNET",
+        "BLUETOOTH",
+        "BLUETOOTH_CONNECT"
+      ]
+    }
+  }
+}
