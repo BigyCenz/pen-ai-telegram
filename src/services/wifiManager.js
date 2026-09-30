@@ -94,3 +94,38 @@ export async function disconnectFromPen() {
     console.warn('Errore disconnessione WiFi', e);
   }
 }
+
+// Prefisso di default della famiglia di penne "Naxclow"/weihome: NON è il
+// nome specifico di un singolo dispositivo, solo il pattern comune usato
+// per riconoscere la rete giusta durante lo scan (resta configurabile
+// nelle Impostazioni per modelli/firmware diversi, es. "Care_").
+export const DEFAULT_SSID_PREFIX = 'Nax_';
+
+// SSID della rete WiFi attualmente connessa (o null se non disponibile/non
+// concesso il permesso). Alcune versioni Android racchiudono il SSID tra
+// virgolette: vengono rimosse per un confronto pulito col prefisso.
+export async function getCurrentSSID() {
+  try {
+    const ssid = await WifiManager.getCurrentWifiSSID();
+    if (!ssid || ssid === '<unknown ssid>') return null;
+    return ssid.replace(/^"(.*)"$/, '$1');
+  } catch (e) {
+    return null;
+  }
+}
+
+export function isPenNetwork(ssid, prefix = DEFAULT_SSID_PREFIX) {
+  if (!ssid || !prefix) return false;
+  return ssid.toLowerCase().startsWith(prefix.toLowerCase());
+}
+
+// Apre le impostazioni WiFi di sistema, così l'utente può connettersi
+// manualmente se lo scan in-app non trova la rete (es. throttling dello
+// scan su Android recenti). Se l'intent specifico non è disponibile,
+// ricade sulle impostazioni dell'app.
+export function openWifiSettings() {
+  if (Platform.OS === 'android' && typeof Linking.sendIntent === 'function') {
+    return Linking.sendIntent('android.settings.WIFI_SETTINGS').catch(() => Linking.openSettings());
+  }
+  return Linking.openSettings();
+}

@@ -7,7 +7,7 @@ const STORAGE_KEY = '@pen_ai_telegram_settings_v1';
 // Nulla è hardcoded: chiavi API, token e prompt restano sempre modificabili.
 const DEFAULT_SETTINGS = {
   pen: {
-    ssidPrefix: '', // opzionale, solo per riconoscere la rete nella lista scan
+    ssidPrefix: '', // vuoto = usa il default "Nax_" (vedi wifiManager.DEFAULT_SSID_PREFIX)
     ip: '', // vuoto = usa il default confermato (192.168.169.1)
     protocol: 'naxclow-v720', // 'naxclow-v720' | 'tutk-iotc' (per penne tipo weihome)
   },

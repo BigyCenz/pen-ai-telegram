@@ -27,4 +27,16 @@ export const typography = {
   body: { fontSize: 15, color: colors.text },
   label: { fontSize: 13, fontWeight: '600', color: colors.textDim, letterSpacing: 0.4 },
   mono: { fontFamily: 'monospace', fontSize: 13, color: colors.text },
+  caption: { fontSize: 12, color: colors.textDim },
+  sectionTitle: { fontSize: 17, fontWeight: '700', color: colors.text },
+};
+
+// Ombra leggera coerente per elevare le card principali sopra lo sfondo,
+// invece di affidarsi solo al border (più moderno, meno "flat casuale").
+export const shadow = {
+  shadowColor: '#000',
+  shadowOffset: { width: 0, height: 4 },
+  shadowOpacity: 0.25,
+  shadowRadius: 10,
+  elevation: 4,
 };
