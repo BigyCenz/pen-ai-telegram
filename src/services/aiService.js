@@ -28,11 +28,18 @@ export async function analyzeImageWithAI({ endpoint, apiKey, provider: providerI
     ...provider.authHeaders(apiKey),
   };
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new Error(
+      `Impossibile raggiungere ${provider.label}: nessuna connessione a internet disponibile in questo momento. Dettaglio: ${e.message}`
+    );
+  }
 
   if (!response.ok) {
     const errText = await response.text();
@@ -57,7 +64,19 @@ export async function fetchAvailableModels({ provider: providerId, apiKey }) {
 
   const headers = provider.authHeaders(apiKey);
 
-  const response = await fetch(url, { method: 'GET', headers });
+  let response;
+  try {
+    response = await fetch(url, { method: 'GET', headers });
+  } catch (e) {
+    // La richiesta non ha nemmeno raggiunto il server (es. instradata
+    // sulla rete WiFi della penna, senza internet): errore di rete, non
+    // di autenticazione/API. Messaggio distinto apposta, per non
+    // confonderlo con una chiave sbagliata durante il debug.
+    throw new Error(
+      `Impossibile raggiungere ${provider.label}: nessuna connessione a internet disponibile in questo momento (verifica di non essere ancora instradato sulla rete della penna). Dettaglio: ${e.message}`
+    );
+  }
+
   if (!response.ok) {
     const errText = await response.text();
     throw new Error(`Errore nel recupero modelli (${response.status}): ${errText}`);

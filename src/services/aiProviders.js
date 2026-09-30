@@ -28,6 +28,14 @@ export const AI_PROVIDERS = [
       return {
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
+        // Anthropic richiede questo header per accettare chiamate dirette
+        // da client "browser-like" (introdotto ad agosto 2024). Il fetch
+        // nativo di React Native su Android/iOS non è un vero browser e
+        // non applica CORS, quindi in teoria non ne avrebbe bisogno — ma
+        // costa nulla mandarlo comunque come protezione aggiuntiva, nel
+        // caso il polyfill fetch usato in un dato ambiente/build si
+        // comporti in modo più simile a un browser.
+        'anthropic-dangerous-direct-browser-access': 'true',
       };
     },
 
