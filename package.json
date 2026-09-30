@@ -20,7 +20,8 @@
     "react-native-tcp-socket": "^6.2.0",
     "buffer": "^6.0.3",
     "react-native-keyevent": "*",
-    "react-native-fs": "^2.20.0"
+    "react-native-fs": "^2.20.0",
+    "@react-native-picker/picker": "2.7.5"
   },
   "devDependencies": {
     "@babel/core": "^7.24.0"

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Platform } from 'react-native';
+import { Picker } from '@react-native-picker/picker';
 import { useSettings } from '../store/SettingsContext';
 import Card from '../components/Card';
 import ConfigField from '../components/ConfigField';
@@ -8,6 +9,7 @@ import { AVAILABLE_TRIGGER_KEYS } from '../services/bluetoothRemoteListener';
 import { validateSettings } from '../services/settingsValidation';
 import { AI_PROVIDERS, getProviderById } from '../services/aiProviders';
 import { fetchAvailableModels } from '../services/aiService';
+import { withMobileNetwork } from '../services/wifiManager';
 
 export default function SettingsScreen() {
   const { settings, updateSettings } = useSettings();
@@ -37,11 +39,21 @@ export default function SettingsScreen() {
     setModelsError(null);
   };
 
+  // Come per analyzeImageWithAI/sendPhotoToTelegram (vedi automationPipeline.js):
+  // se il telefono è ancora connesso al WiFi della penna, quella rete è
+  // forzata come rotta per TUTTO il processo (bindProcessToNetwork) e non
+  // ha internet, quindi anche questa chiamata verso l'API del provider AI
+  // fallirebbe con un generico errore di rete se non venisse avvolta in
+  // withMobileNetwork(). Prima di questo fix questa era l'unica chiamata
+  // di rete esterna dell'app rimasta SENZA questo wrapper.
   const loadModels = useCallback(async () => {
     setModelsLoading(true);
     setModelsError(null);
     try {
-      const models = await fetchAvailableModels({ provider: local.ai.provider, apiKey: local.ai.apiKey });
+      const models = await withMobileNetwork(
+        () => fetchAvailableModels({ provider: local.ai.provider, apiKey: local.ai.apiKey }),
+        local.pen.ssidPrefix
+      );
       setAvailableModels(models);
       if (models.length === 0) {
         setModelsError('Nessun modello compatibile trovato per questo account/chiave.');
@@ -51,7 +63,7 @@ export default function SettingsScreen() {
     } finally {
       setModelsLoading(false);
     }
-  }, [local.ai.provider, local.ai.apiKey]);
+  }, [local.ai.provider, local.ai.apiKey, local.pen.ssidPrefix]);
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -160,24 +172,33 @@ export default function SettingsScreen() {
         )}
 
         {availableModels.length > 0 && (
-          <View style={{ marginTop: spacing(1.5) }}>
-            {availableModels.map((m) => (
-              <TouchableOpacity
-                key={m.id}
-                style={styles.modelRow}
-                onPress={() => setLocal((s) => ({ ...s, ai: { ...s.ai, model: m.id } }))}
-              >
-                <Text style={[typography.body, local.ai.model === m.id && { color: colors.primary, fontWeight: '700' }]}>
-                  {m.label}
-                </Text>
-                {local.ai.model === m.id && <Text style={{ color: colors.primary }}>✓</Text>}
-              </TouchableOpacity>
-            ))}
+          <View style={styles.pickerWrap}>
+            <Picker
+              selectedValue={
+                // Se il modello salvato non è tra quelli fetchati (es.
+                // configurato a mano prima, o provider appena cambiato),
+                // il Picker su Android va comunque in errore se il value
+                // non corrisponde a nessun Item: aggiungiamo quindi un
+                // Item "attuale" fuori elenco quando serve (vedi sotto).
+                local.ai.model
+              }
+              onValueChange={(v) => setLocal((s) => ({ ...s, ai: { ...s.ai, model: v } }))}
+              style={styles.picker}
+              dropdownIconColor={colors.text}
+              itemStyle={styles.pickerItem}
+            >
+              {!availableModels.some((m) => m.id === local.ai.model) && local.ai.model && (
+                <Picker.Item label={`${local.ai.model} (attuale, non nell'elenco)`} value={local.ai.model} />
+              )}
+              {availableModels.map((m) => (
+                <Picker.Item key={m.id} label={m.label} value={m.id} />
+              ))}
+            </Picker>
           </View>
         )}
 
         <ConfigField
-          label="Modello (manuale, se preferisci non usare l'elenco sopra)"
+          label={availableModels.length > 0 ? 'Modello (oppure scrivilo qui a mano)' : 'Modello (manuale, oppure recupera l\'elenco sopra)'}
           value={local.ai.model}
           onChangeText={(v) => setLocal((s) => ({ ...s, ai: { ...s.ai, model: v } }))}
         />
@@ -238,14 +259,20 @@ const styles = StyleSheet.create({
   },
   secondaryFilledBtnText: { color: colors.text, fontWeight: '600', fontSize: 14 },
   btnDisabled: { opacity: 0.5 },
-  modelRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+  pickerWrap: {
+    marginTop: spacing(1.5),
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: 'hidden',
+    // Su iOS il Picker si comporta come una wheel view e ha bisogno di
+    // altezza propria per essere leggibile; su Android è un dropdown
+    // compatto e questa altezza fissa non serve (viene ignorata).
+    ...(Platform.OS === 'ios' ? { height: 160 } : null),
   },
+  picker: { color: colors.text },
+  pickerItem: { color: colors.text, fontSize: 15 },
   saveBtn: {
     backgroundColor: colors.primary,
     borderRadius: radius.md,
