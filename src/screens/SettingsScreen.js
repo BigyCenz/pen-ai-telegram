@@ -21,7 +21,28 @@ export default function SettingsScreen() {
 
   useEffect(() => setLocal(settings), [settings]);
 
-  const save = () => updateSettings(local);
+  // Chiavi/token incollati da un messaggio o da una pagina web spesso si
+  // portano dietro uno spazio o un a-capo finale: finirebbero negli header
+  // HTTP e farebbero rifiutare la richiesta come "chiave non valida" senza
+  // che l'utente capisca perché. Vengono ripuliti al salvataggio.
+  const [saved, setSaved] = useState(false);
+  const save = () => {
+    const clean = {
+      ...local,
+      pen: { ...local.pen, ssidPrefix: local.pen.ssidPrefix.trim(), ip: local.pen.ip.trim() },
+      ai: {
+        ...local.ai,
+        endpoint: local.ai.endpoint.trim(),
+        apiKey: local.ai.apiKey.trim(),
+        model: (local.ai.model || '').trim(),
+      },
+      telegram: { botToken: local.telegram.botToken.trim(), chatId: local.telegram.chatId.trim() },
+    };
+    setLocal(clean);
+    updateSettings(clean);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
 
   const currentProvider = getProviderById(local.ai.provider);
 
@@ -171,37 +192,35 @@ export default function SettingsScreen() {
           <Text style={[typography.subtitle, { color: colors.warning, marginTop: spacing(1) }]}>{modelsError}</Text>
         )}
 
-        {availableModels.length > 0 && (
-          <View style={styles.pickerWrap}>
-            <Picker
-              selectedValue={
-                // Se il modello salvato non è tra quelli fetchati (es.
-                // configurato a mano prima, o provider appena cambiato),
-                // il Picker su Android va comunque in errore se il value
-                // non corrisponde a nessun Item: aggiungiamo quindi un
-                // Item "attuale" fuori elenco quando serve (vedi sotto).
-                local.ai.model
-              }
-              onValueChange={(v) => setLocal((s) => ({ ...s, ai: { ...s.ai, model: v } }))}
-              style={styles.picker}
-              dropdownIconColor={colors.text}
-              itemStyle={styles.pickerItem}
-            >
-              {!availableModels.some((m) => m.id === local.ai.model) && local.ai.model && (
+        <View style={styles.pickerWrap}>
+          <Picker
+            selectedValue={local.ai.model}
+            onValueChange={(v) => setLocal((s) => ({ ...s, ai: { ...s.ai, model: v } }))}
+            style={styles.picker}
+            dropdownIconColor={colors.text}
+            itemStyle={styles.pickerItem}
+          >
+            {/* Finché non si è ancora recuperato l'elenco dal provider, l'unica
+                opzione disponibile è quella già salvata (o il default del
+                provider): evita un Picker vuoto o senza valore valido prima
+                del primo fetch, senza bisogno di un campo di testo separato. */}
+            {availableModels.length === 0 && (
+              <Picker.Item
+                label={local.ai.model || currentProvider.defaultModel}
+                value={local.ai.model || currentProvider.defaultModel}
+              />
+            )}
+            {!availableModels.some((m) => m.id === local.ai.model) &&
+              local.ai.model &&
+              availableModels.length > 0 && (
                 <Picker.Item label={`${local.ai.model} (attuale, non nell'elenco)`} value={local.ai.model} />
               )}
-              {availableModels.map((m) => (
-                <Picker.Item key={m.id} label={m.label} value={m.id} />
-              ))}
-            </Picker>
-          </View>
-        )}
+            {availableModels.map((m) => (
+              <Picker.Item key={m.id} label={m.label} value={m.id} />
+            ))}
+          </Picker>
+        </View>
 
-        <ConfigField
-          label={availableModels.length > 0 ? 'Modello (oppure scrivilo qui a mano)' : 'Modello (manuale, oppure recupera l\'elenco sopra)'}
-          value={local.ai.model}
-          onChangeText={(v) => setLocal((s) => ({ ...s, ai: { ...s.ai, model: v } }))}
-        />
         <ConfigField
           label="Prompt"
           value={local.ai.prompt}
@@ -227,7 +246,7 @@ export default function SettingsScreen() {
       </Card>
 
       <TouchableOpacity style={styles.saveBtn} onPress={save}>
-        <Text style={styles.saveBtnText}>Salva impostazioni</Text>
+        <Text style={styles.saveBtnText}>{saved ? 'Impostazioni salvate ✓' : 'Salva impostazioni'}</Text>
       </TouchableOpacity>
     </ScrollView>
   );

@@ -48,7 +48,18 @@ export function SettingsProvider({ children }) {
           if (parsed.ai && !parsed.ai.provider) {
             parsed.ai.provider = guessProviderFromEndpoint(parsed.ai.endpoint);
           }
-          setSettings((prev) => ({ ...prev, ...parsed }));
+          // Merge per sezione (non solo superficiale): se la versione salvata
+          // non ha ancora un campo introdotto dopo (es. pen.ip), quel campo
+          // resta al valore di default invece di sparire insieme alla
+          // sezione intera.
+          setSettings((prev) => ({
+            ...prev,
+            ...parsed,
+            pen: { ...prev.pen, ...(parsed.pen || {}) },
+            ai: { ...prev.ai, ...(parsed.ai || {}) },
+            telegram: { ...prev.telegram, ...(parsed.telegram || {}) },
+            remote: { ...prev.remote, ...(parsed.remote || {}) },
+          }));
         }
       } catch (e) {
         console.warn('Errore caricamento impostazioni', e);

@@ -3,6 +3,7 @@
 // semplici glifi unicode monospaced, leggeri e sempre disponibili.
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, radius, spacing } from '../theme';
 
 const TABS = [
@@ -13,8 +14,12 @@ const TABS = [
 ];
 
 export default function BottomTabBar({ activeKey, onSelect }) {
+  // L'area sicura inferiore (barra di navigazione a gesti / tasti di
+  // sistema) va aggiunta al padding, altrimenti la tab bar può finire
+  // sotto i controlli di sistema sui telefoni con edge-to-edge.
+  const insets = useSafeAreaInsets();
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, { paddingBottom: 10 + insets.bottom }]}>
       {TABS.map((tab) => {
         const active = tab.key === activeKey;
         return (

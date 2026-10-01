@@ -88,13 +88,26 @@ export default function HomeScreen({ navigation }) {
           <Text style={[typography.body, { marginBottom: spacing(1) }]}>
             Rete attuale: <Text style={{ fontWeight: '700' }}>{currentSsid}</Text>
           </Text>
-        ) : (
+        ) : !permissionIssue ? (
           <Text style={[typography.subtitle, { marginBottom: spacing(1) }]}>
-            Nessuna rete WiFi rilevata (o permessi non concessi).
+            Nessuna rete WiFi rilevata.
           </Text>
+        ) : null}
+
+        {!onWifiCardConnected && permissionIssue && (
+          <View style={styles.warnBox}>
+            <Text style={styles.warnTitle}>Serve un tuo intervento</Text>
+            <Text style={styles.warnText}>{permissionIssue.reason}</Text>
+            <TouchableOpacity style={styles.warnBtn} onPress={permissionIssue.openSettings}>
+              <Text style={styles.warnBtnText}>{permissionIssue.actionLabel || 'Apri impostazioni'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={refreshWifiStatus}>
+              <Text style={styles.secondaryBtnText}>Ho sistemato · riprova</Text>
+            </TouchableOpacity>
+          </View>
         )}
 
-        {!onWifiCardConnected && (
+        {!onWifiCardConnected && !permissionIssue && (
           <>
             <Text style={[typography.subtitle, { marginBottom: spacing(1.5) }]}>
               Connettiti a una rete che inizia con "{ssidPrefix}" (il prefisso è configurabile nelle Impostazioni).
@@ -122,17 +135,6 @@ export default function HomeScreen({ navigation }) {
                   </TouchableOpacity>
                 ))}
               </View>
-            )}
-
-            {permissionIssue && (
-              <TouchableOpacity
-                style={[styles.secondaryBtn, { marginTop: spacing(1) }]}
-                onPress={permissionIssue.openSettings}
-              >
-                <Text style={[styles.secondaryBtnText, { color: colors.warning }]}>
-                  {permissionIssue.reason} · Apri impostazioni
-                </Text>
-              </TouchableOpacity>
             )}
 
             <TouchableOpacity style={styles.secondaryBtn} onPress={refreshWifiStatus}>
@@ -230,6 +232,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   btnDisabled: { opacity: 0.6 },
+  warnBox: {
+    backgroundColor: 'rgba(251,191,36,0.10)',
+    borderWidth: 1,
+    borderColor: colors.warning,
+    borderRadius: radius.md,
+    padding: spacing(2),
+  },
+  warnTitle: { color: colors.warning, fontWeight: '700', fontSize: 14, marginBottom: 4 },
+  warnText: { color: colors.text, fontSize: 14, lineHeight: 20, marginBottom: spacing(1.5) },
+  warnBtn: {
+    backgroundColor: colors.warning,
+    borderRadius: radius.md,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  warnBtnText: { color: '#1A1300', fontWeight: '700', fontSize: 14 },
   primaryBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
   networkRow: {
     flexDirection: 'row',

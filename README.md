@@ -1,86 +1,110 @@
 # Pen AI → Telegram
 
 App React Native (Expo) che si collega direttamente all'Access Point WiFi di
-una penna spia (famiglia A9 / Naxclow / app companion V720), riceve uno
-snapshot al trigger di un telecomando otturatore Bluetooth, lo invia a
-un'AI configurabile via API con un prompt personalizzabile, e inoltra la
-risposta a una chat Telegram tramite bot.
+una penna con telecamera (famiglia A9 / Naxclow, app originale **V720**),
+scatta una foto al comando di un telecomando otturatore Bluetooth, la invia a
+un'AI a tua scelta (Anthropic, OpenAI o Gemini) con un prompt configurabile e
+inoltra la risposta a una chat Telegram tramite un tuo bot.
 
-## Struttura del progetto
+Flusso automatico dal telecomando: **scatto → AI → Telegram**. Dall'app puoi
+anche scattare e controllare la foto prima, e avviare l'invio solo quando vuoi.
 
-```
-App.js                          entry point + navigazione
-src/
-  theme.js                      colori, spaziatura, tipografia
-  store/SettingsContext.js      impostazioni persistenti (AsyncStorage)
-  services/
-    naxclowClient.js            protocollo UDP verso la penna (AP diretto)
-    wifiManager.js               scan/connessione WiFi + binding rete
-    bluetoothRemoteListener.js  ascolto tasti hardware telecomando BT
-    aiService.js                 chiamata API AI configurabile
-    telegramService.js           invio foto/messaggi al bot Telegram
-    automationPipeline.js        orchestrazione scatto -> AI -> Telegram
-  screens/
-    HomeScreen.js                connessione, scatto, log, anteprima
-    SettingsScreen.js            configurazione AI / Telegram / penna / tasto
-  components/
-    Card.js, StatusBadge.js, ConfigField.js
-```
+## Come si usa
 
-## Requisiti tecnici importanti
+1. **Impostazioni** → scegli il provider AI, inserisci la chiave API, usa
+   "Recupera modelli disponibili" e scegli il modello dalla lista; imposta il
+   prompt, il token del bot Telegram e il chat ID; poi *Salva*.
+2. **Penna** → passo 1: collega il telefono alla rete WiFi della penna
+   (`Nax_…`); passo 2: *Connetti alla penna*.
+3. **Cattura** → scatta dall'app, oppure premi il tasto del telecomando
+   Bluetooth (di default il tasto "volume su") per l'intero flusso automatico.
 
-Questo progetto usa moduli nativi (`react-native-wifi-reborn`,
-`react-native-udp`, `react-native-keyevent`) che **non funzionano con Expo
-Go**. Serve un dev client personalizzato:
+Le richieste verso AI e Telegram escono automaticamente sui **dati mobili**,
+anche mentre il WiFi resta agganciato alla penna (che non ha internet).
+
+## Build
+
+Il progetto usa moduli nativi (`react-native-wifi-reborn`,
+`react-native-tcp-socket`, `react-native-keyevent`, `expo-location`, più il
+modulo locale `modules/cellular-network`): **non funziona con Expo Go**, serve
+un dev client. Dopo ogni modifica a dipendenze o plugin nativi:
 
 ```bash
 npm install
-npx expo prebuild
-npx expo run:android          # build locale, richiede Android SDK
-# oppure, se preferisci EAS Build (cloud, non richiede setup Android locale):
-# eas build --profile development --platform android
+npx expo prebuild --clean
+npx expo run:android
 ```
 
-## Protocollo della penna — CONFERMATO da cattura reale (30/09/2026)
+Il plugin `plugins/withKeyEvent.js` inietta in `MainActivity` l'inoltro dei
+tasti hardware al modulo `react-native-keyevent` (senza, il telecomando non
+scatterebbe): viene riapplicato automaticamente a ogni `prebuild`.
 
-Non più placeholder: il protocollo è stato ricavato da un'analisi diretta di
-un file .pcap catturato dall'app V720 originale.
+## Struttura
 
-- **Trasporto**: TCP, porta 6123 (non UDP)
-- **IP penna**: `192.168.169.1` (gateway della rete AP, configurabile nelle Impostazioni se il tuo firmware usa un indirizzo diverso)
-- **Header di ogni messaggio** (20 byte): lunghezza payload (4B LE) + tipo messaggio (4B LE: 0=JSON, 1=chunk snapshot JPEG in chiaro, 4=chunk video live in formato diverso/non ancora decifrato) + 8 byte (placeholder ASCII "00000000" per i comandi JSON) + 4 byte finali
-- **Login**: `{"unixTimer":...,"code":501,"target":"<devId>","token":"NaxclowToken"}` → risposta `status:200`
-- **Comando snapshot**: `{"code":502,"content":{"devTarget":"<devId>","code":218}}` → risposta come sequenza di chunk tipo 1 da concatenare fino al marker JPEG di fine (`FF D9`)
-- `devId` = parte dopo `Nax_` nel nome della rete WiFi della penna
+```
+App.js                           entry point + navigazione a tab
+plugins/withKeyEvent.js          config plugin: tasti hardware -> JS
+modules/cellular-network/        modulo nativo Kotlin: forza i dati mobili
+scripts/generate_icons.py        rigenera icona/splash (colori di theme.js)
+assets/                          icon, adaptive icon, splash, favicon
+src/
+  theme.js                       colori, spaziature, tipografia
+  store/
+    SettingsContext.js           impostazioni persistenti (AsyncStorage)
+    PenConnectionContext.js      stato WiFi + sessione penna + cattura/invio
+  services/
+    naxclowClient.js             protocollo TCP della penna
+    wifiManager.js               permessi, scan/connessione WiFi, routing rete
+    aiProviders.js / aiService.js  provider AI (Anthropic, OpenAI, Gemini)
+    telegramService.js           invio foto/messaggi al bot
+    automationPipeline.js        scatto -> AI -> Telegram
+    bluetoothRemoteListener.js   tasto del telecomando (con anti-rimbalzo)
+    settingsValidation.js        controllo campi obbligatori
+  screens/                       Penna, Cattura, Log, Impostazioni
+  components/                    Card, StatusBadge, InfoRow, BottomTabBar, ...
+pen2.pcap, pen3.pcap             catture di rete usate per ricavare il protocollo
+```
 
-**Nota**: lo streaming video continuo (tipo 4) usa un formato diverso da JPEG puro (probabilmente scrambled/proprietario) e non è ancora stato decodificato — l'app usa quindi snapshot ripetuti per l'anteprima "live" invece del vero streaming continuo, finché non si decifra anche quel formato.
+## Comportamenti da conoscere
 
-## Cosa è già pronto e cosa va ancora verificato con la penna fisica in mano
+- **Permessi**: se mancano i permessi (Posizione, Dispositivi WiFi vicini),
+  la localizzazione di sistema è spenta o il WiFi è spento, la schermata
+  Penna lo spiega e offre il pulsante che porta alla schermata giusta.
+- **Riconnessione**: dopo "Termina sessione" l'app attende 1,5 s prima di
+  riconnettersi e, se la penna non risponde all'handshake, riprova fino a 3
+  volte (gli stack TCP embedded rilasciano la sessione precedente con
+  ritardo).
+- **Errori**: ogni errore mostrato all'utente è in italiano e dice cosa
+  correggere (chiave API non valida, bot token errato, chat non trovata,
+  penna non raggiungibile…); il dettaglio tecnico resta nella tab *Log*.
+- **Modello AI**: si sceglie solo dalla lista recuperata dal provider (serve
+  la chiave API); finché non la recuperi è disponibile solo il modello
+  attualmente salvato.
 
-**Pronto e stabile (non dipende dal modello preciso della penna):**
-- Interfaccia completa (Home + Impostazioni)
-- Persistenza impostazioni (AI, Telegram, penna, tasto trigger)
-- Scan/connessione WiFi alla rete della penna
-- Ascolto telecomando Bluetooth (tasto volume come trigger)
-- Chiamata AI configurabile (endpoint, modello, chiave, prompt)
-- Invio foto + risposta AI su Telegram
-- Gestione errori con notifica di fallback su Telegram
+## Protocollo della penna (da cattura reale, `pen2.pcap`)
 
-**Da verificare/completare con la penna fisica in mano** (vedi commenti
-`TODO` in `src/services/naxclowClient.js`):
-- IP e porta esatti della penna in modalità AP
-- Formato esatto del pacchetto di login e del comando di richiesta snapshot
-  (byte esatti, ricavabili da packet capture con Wireshark o leggendo il
-  codice sorgente del progetto open source `intx82/a9-v720`)
-- Se il frame JPEG arriva in un solo pacchetto UDP o frammentato su più
-  pacchetti (la funzione `requestSnapshot` va adattata di conseguenza)
-- Comportamento reale di Android nel tenere attiva la connessione dati
-  mobile mentre il WiFi è forzato sulla penna (varia leggermente tra
-  versioni Android/produttori)
+TCP, porta 6123, IP `192.168.169.1` (gateway dell'AP, modificabile nelle
+Impostazioni). Ogni messaggio ha un header di 20 byte: lunghezza payload
+(uint32 LE), tipo (uint32 LE), 8 byte di placeholder (ASCII `00000000` per
+tipo 0 e 100, zeri raw per gli altri), 4 byte finali (contatore sui chunk
+immagine).
 
-## Prossimo passo consigliato
+| Tipo | Significato |
+|------|-------------|
+| 0    | comando/risposta JSON |
+| 1    | chunk di JPEG in chiaro |
+| 4    | video live offuscato (formato non decifrato, ignorato) |
+| 100  | keepalive (telefono → penna, ogni ~9 s) |
+| 114  | discovery del `devId` (connessione breve a sé stante) |
+| 115  | ping/pong iniziale prima del login |
 
-Una volta accesa la penna, ripetere la cattura del traffico con Wireshark
-(vedi procedura discussa in precedenza) puntata sulla richiesta di
-snapshot dall'app originale V720, per confermare i byte esatti da mettere
-in `buildLoginPacket()` e `buildSnapshotRequestPacket()`.
+Sequenza di sessione: discovery (114) → ping/pong (115) → login
+(`code 501`, token `NaxclowToken`) → stato device (`502/code 4`) → live view
+(`502/code 3`) → snapshot (`502/code 218`). Dopo l'avvio della live view la
+penna trasmette in autonomia un flusso continuo di JPEG completi: lo
+"snapshot" è il primo frame il cui inizio arriva dopo il comando.
+
+## Sicurezza
+
+Chiave API e token del bot sono salvati in chiaro nello storage locale
+dell'app (AsyncStorage). Non committarli mai nel repository.

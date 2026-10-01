@@ -15,6 +15,11 @@ const KEYCODE_MAP = {
 };
 
 let currentHandler = null;
+let lastTriggerAt = 0;
+
+// Tempo minimo tra due scatti: un tasto tenuto premuto (o un telecomando che
+// manda eventi ripetuti/doppi) non deve far partire più scatti ravvicinati.
+const TRIGGER_DEBOUNCE_MS = 1200;
 
 export function startRemoteListener(triggerKeyName, onTrigger) {
   stopRemoteListener();
@@ -22,13 +27,18 @@ export function startRemoteListener(triggerKeyName, onTrigger) {
   const targetCode = KEYCODE_MAP[triggerKeyName] ?? KEYCODE_MAP.VOLUME_UP;
 
   currentHandler = (keyEvent) => {
-    if (keyEvent.keyCode === targetCode) {
-      onTrigger();
-    }
+    if (keyEvent.keyCode !== targetCode) return;
+    const now = Date.now();
+    if (now - lastTriggerAt < TRIGGER_DEBOUNCE_MS) return;
+    lastTriggerAt = now;
+    onTrigger();
   };
 
-  // Intercetta l'evento PRIMA che il sistema lo usi per alzare/abbassare il
-  // volume reale (altrimenti ogni scatto cambierebbe anche il volume media).
+  // Gli eventi arrivano solo se MainActivity li inoltra al modulo: lo fa il
+  // config plugin plugins/withKeyEvent.js (applicato da `expo prebuild`).
+  // Nota: il tasto continua ad avere anche il suo effetto di sistema
+  // (es. il volume cambia comunque), perché l'evento viene solo "osservato",
+  // non consumato.
   KeyEvent.onKeyDownListener(currentHandler);
 }
 

@@ -31,6 +31,37 @@ import { useSettings } from './SettingsContext';
 
 const PenConnectionContext = createContext(null);
 
+// Tempo minimo da rispettare tra la chiusura di una sessione TCP e
+// l'apertura della successiva. Gli stack TCP embedded di questi dispositivi
+// (penna) sono spesso a singola connessione: se la precedente non ha ancora
+// finito di rilasciarsi lato device quando arriva un nuovo SYN, il device
+// non risponde e l'handshake ping/pong (type=115) va in timeout — è la
+// causa più comune dell'errore "la penna non ha risposto" subito dopo aver
+// terminato una sessione e averne avviata subito un'altra.
+const RECONNECT_COOLDOWN_MS = 1500;
+
+// Traduce i messaggi tecnici interni (pensati per i log/debug) in messaggi
+// comprensibili per l'utente in UI. Tenuto in un unico punto così la
+// schermata di connessione e qualunque altro posto mostrino sempre lo
+// stesso testo per lo stesso problema, invece di stringhe diverse a
+// seconda di dove l'errore viene intercettato.
+function friendlyPenError(message) {
+  if (!message) return 'Errore sconosciuto nella connessione alla penna.';
+  if (/ping\/pong|handshake|type[\s=]*115/i.test(message)) {
+    return 'La penna non ha risposto alla connessione. Può succedere subito dopo aver terminato una sessione precedente: riprova tra qualche secondo.';
+  }
+  if (/timeout/i.test(message) && /login/i.test(message)) {
+    return 'La penna non ha confermato il login in tempo. Riprova.';
+  }
+  if (/timeout/i.test(message) && /snapshot/i.test(message)) {
+    return 'La penna non ha inviato lo scatto in tempo. Riprova.';
+  }
+  if (/econnrefused|network is unreachable|host is down/i.test(message)) {
+    return 'Impossibile raggiungere la penna su questa rete. Verifica di essere ancora connesso al suo WiFi.';
+  }
+  return message;
+}
+
 // Stati possibili della rete WiFi rispetto alla penna.
 export const WIFI_STATUS = {
   UNKNOWN: 'unknown', // non ancora controllato
@@ -60,10 +91,13 @@ export function PenConnectionProvider({ children }) {
 
   const [captureBusy, setCaptureBusy] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
+  const [captureError, setCaptureError] = useState(null);
+  const [sendError, setSendError] = useState(null);
   const [lastCapture, setLastCapture] = useState(null); // { imagePath, aiText, capturedAt }
 
   const [log, setLog] = useState([]);
   const clientRef = useRef(null);
+  const lastDisconnectAtRef = useRef(0);
   // Ref sempre aggiornato all'ultima versione di capture(): usato dal
   // listener del telecomando Bluetooth per evitare di dover
   // ri-registrare/de-registrare il listener nativo ogni volta che capture
@@ -172,53 +206,87 @@ export function PenConnectionProvider({ children }) {
     setPenStatus(PEN_STATUS.CONNECTING);
     setPenError(null);
 
-    try {
-      let devId = null;
-      let discoveryInfo = null;
-      try {
-        pushLog('Richiesta devId alla penna (discovery)...');
-        discoveryInfo = await discoverDevice({ deviceIp });
-        devId = discoveryInfo.devId;
-        pushLog(`Penna identificata: ${discoveryInfo.devName || devId} (batteria ${discoveryInfo.battery ?? '?'}%)`);
-      } catch (e) {
-        devId = extractDevIdFromSsid(currentSsid);
-        pushLog(`Discovery non riuscita (${e.message}). Uso il devId dedotto dal SSID: ${devId || 'non determinato'}`);
-      }
-
-      const client = new NaxclowClient({ deviceIp, ssid: currentSsid, devId });
-      pushLog(`Apertura connessione TCP a ${deviceIp}:6123...`);
-      await client.connect();
-
-      pushLog('Login sulla penna...');
-      await client.login();
-
-      const status = await client.queryStatus();
-      if (status) {
-        pushLog(`Stato penna: batteria ${status.devPower ?? '?'}%, wifi "${status.wifiName ?? '?'}", fw ${status.version ?? '?'}`);
-      }
-
-      // Non avviamo più startLiveView() qui: parte in modo lazy al primo
-      // scatto (dentro requestSnapshot), altrimenti la penna comincia a
-      // martellare di dati la connessione fin da subito, anche restando
-      // sulla schermata senza scattare, ed è quello che rendeva tutta la
-      // UI lenta/bloccata appena connessi.
-      clientRef.current = client;
-
-      setPenInfo({
-        devId,
-        devName: discoveryInfo?.devName,
-        devModel: discoveryInfo?.devModel,
-        battery: status?.devPower ?? discoveryInfo?.battery,
-        wifiName: status?.wifiName,
-        firmwareVersion: status?.version,
-      });
-      setPenStatus(PEN_STATUS.CONNECTED);
-      pushLog('Sessione penna attiva.');
-    } catch (e) {
-      setPenStatus(PEN_STATUS.ERROR);
-      setPenError(e.message);
-      pushLog(`Errore sessione penna: ${e.message}`);
+    // Rispetta un breve cooldown se una sessione precedente è stata chiusa
+    // da poco: vedi commento su RECONNECT_COOLDOWN_MS per il perché.
+    const msSinceDisconnect = Date.now() - lastDisconnectAtRef.current;
+    if (lastDisconnectAtRef.current > 0 && msSinceDisconnect < RECONNECT_COOLDOWN_MS) {
+      const waitMs = RECONNECT_COOLDOWN_MS - msSinceDisconnect;
+      pushLog(`Attendo ${Math.ceil(waitMs / 100) / 10}s prima di riconnettermi (la sessione precedente si è appena chiusa)...`);
+      await new Promise((r) => setTimeout(r, waitMs));
     }
+
+    // Fino a 3 tentativi complessivi: l'handshake iniziale (ping/pong) può
+    // fallire per flakiness momentanea dello stack TCP embedded della
+    // penna, soprattutto subito dopo una sessione precedente — un retry
+    // automatico risolve la maggior parte di questi casi senza che
+    // l'utente debba accorgersene o premere di nuovo "Connetti".
+    const MAX_ATTEMPTS = 3;
+    let lastError = null;
+    // Esito della discovery, conservato tra un tentativo e l'altro: una
+    // volta ottenuto il devId non serve richiederlo di nuovo ai retry.
+    let devId = null;
+    let discoveryInfo = null;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      let client = null;
+      try {
+        if (attempt > 1) {
+          pushLog(`Nuovo tentativo di connessione (${attempt}/${MAX_ATTEMPTS})...`);
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
+        }
+
+        if (!discoveryInfo) {
+          try {
+            pushLog('Richiesta devId alla penna (discovery)...');
+            discoveryInfo = await discoverDevice({ deviceIp });
+            devId = discoveryInfo.devId;
+            pushLog(`Penna identificata: ${discoveryInfo.devName || devId} (batteria ${discoveryInfo.battery ?? '?'}%)`);
+          } catch (e) {
+            devId = devId || extractDevIdFromSsid(currentSsid);
+            pushLog(`Discovery non riuscita (${e.message}). Uso il devId dedotto dal SSID: ${devId || 'non determinato'}`);
+          }
+        }
+
+        client = new NaxclowClient({ deviceIp, ssid: currentSsid, devId });
+        pushLog(`Apertura connessione TCP a ${deviceIp}:6123...`);
+        await client.connect();
+
+        pushLog('Login sulla penna...');
+        await client.login();
+
+        const status = await client.queryStatus();
+        if (status) {
+          pushLog(`Stato penna: batteria ${status.devPower ?? '?'}%, wifi "${status.wifiName ?? '?'}", fw ${status.version ?? '?'}`);
+        }
+
+        // Non avviamo più startLiveView() qui: parte in modo lazy al primo
+        // scatto (dentro requestSnapshot), altrimenti la penna comincia a
+        // martellare di dati la connessione fin da subito, anche restando
+        // sulla schermata senza scattare, ed è quello che rendeva tutta la
+        // UI lenta/bloccata appena connessi.
+        clientRef.current = client;
+
+        setPenInfo({
+          devId,
+          devName: discoveryInfo?.devName,
+          devModel: discoveryInfo?.devModel,
+          battery: status?.devPower ?? discoveryInfo?.battery,
+          wifiName: status?.wifiName,
+          firmwareVersion: status?.version,
+        });
+        setPenStatus(PEN_STATUS.CONNECTED);
+        pushLog('Sessione penna attiva.');
+        return;
+      } catch (e) {
+        lastError = e;
+        if (client) client.close();
+        pushLog(`Tentativo ${attempt}/${MAX_ATTEMPTS} fallito: ${e.message}`);
+      }
+    }
+
+    setPenStatus(PEN_STATUS.ERROR);
+    setPenError(friendlyPenError(lastError?.message));
+    pushLog(`Errore sessione penna: ${lastError?.message}`);
   }, [wifiStatus, settings.pen.ip, currentSsid, pushLog]);
 
   const disconnectPenSession = useCallback(async () => {
@@ -226,6 +294,7 @@ export function PenConnectionProvider({ children }) {
     if (clientRef.current) {
       clientRef.current.close();
       clientRef.current = null;
+      lastDisconnectAtRef.current = Date.now();
       pushLog('Sessione penna chiusa.');
     }
     setPenStatus(PEN_STATUS.IDLE);
@@ -246,13 +315,17 @@ export function PenConnectionProvider({ children }) {
     if (captureBusy) return null;
 
     setCaptureBusy(true);
+    setCaptureError(null);
     try {
       const imagePath = await captureSnapshot({ naxclowClient: client, onStatus: pushLog });
       const result = { imagePath, aiText: null, capturedAt: Date.now() };
       setLastCapture(result);
       return result;
     } catch (e) {
-      // già loggato dentro captureSnapshot
+      // già loggato dentro captureSnapshot; qui va anche mostrato in UI,
+      // non solo nel tab Log, altrimenti lo scatto fallisce "in silenzio"
+      // agli occhi dell'utente sulla schermata Cattura.
+      setCaptureError(friendlyPenError(e.message));
       return null;
     } finally {
       setCaptureBusy(false);
@@ -266,17 +339,22 @@ export function PenConnectionProvider({ children }) {
 
     const { valid, problems } = validateSettings(settings);
     if (!valid) {
-      pushLog(`Impossibile avviare: impostazioni AI/Telegram incomplete (${problems.join(', ')}).`);
+      const msg = `Impostazioni AI/Telegram incomplete (${problems.join(', ')}).`;
+      pushLog(`Impossibile avviare: ${msg}`);
+      setSendError(msg);
       return null;
     }
 
     setSendBusy(true);
+    setSendError(null);
     try {
       const aiText = await sendImageThroughPipeline({ imagePath: lastCapture.imagePath, settings, onStatus: pushLog });
       setLastCapture((prev) => (prev ? { ...prev, aiText } : prev));
       return aiText;
     } catch (e) {
-      // già loggato dentro sendImageThroughPipeline
+      // già loggato dentro sendImageThroughPipeline; vedi nota sopra su
+      // capture() per il perché va mostrato anche qui, non solo nel log.
+      setSendError(e.message);
       return null;
     } finally {
       setSendBusy(false);
@@ -297,6 +375,8 @@ export function PenConnectionProvider({ children }) {
 
     const { valid, problems } = validateSettings(settings);
     setCaptureBusy(true);
+    setCaptureError(null);
+    setSendError(null);
     try {
       if (!valid) {
         pushLog(`Impostazioni AI/Telegram incomplete (${problems.join(', ')}): scatto solo la foto.`);
@@ -307,7 +387,10 @@ export function PenConnectionProvider({ children }) {
       const result = await runCaptureToTelegramFlow({ naxclowClient: client, settings, onStatus: pushLog });
       setLastCapture({ ...result, capturedAt: Date.now() });
     } catch (e) {
-      // già loggato dentro la pipeline
+      // già loggato dentro la pipeline; qui captureError copre sia lo
+      // scatto che un eventuale fallimento dell'invio, dato che questo
+      // flusso li esegue in sequenza come un'unica azione dal telecomando.
+      setCaptureError(friendlyPenError(e.message));
     } finally {
       setCaptureBusy(false);
     }
@@ -360,8 +443,10 @@ export function PenConnectionProvider({ children }) {
     // cattura + automazione
     capture,
     captureBusy,
+    captureError,
     sendLastCapture,
     sendBusy,
+    sendError,
     lastCapture,
     // log condiviso
     log,

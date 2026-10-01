@@ -3,6 +3,7 @@
 // al WiFi della penna ma le richieste internet passano comunque.
 import WifiManager from 'react-native-wifi-reborn';
 import { PermissionsAndroid, Platform, Linking } from 'react-native';
+import * as Location from 'expo-location';
 import { requestCellular, releaseCellular } from '../../modules/cellular-network/src';
 
 // Confermato da cattura reale: la penna V720/Naxclow fa da gateway della
@@ -16,6 +17,25 @@ export const DEFAULT_PEN_IP = '192.168.169.1';
 const NEARBY_WIFI_DEVICES =
   PermissionsAndroid.PERMISSIONS.NEARBY_WIFI_DEVICES || 'android.permission.NEARBY_WIFI_DEVICES';
 
+// Nomi leggibili dei permessi Android, per messaggi comprensibili in UI
+// invece di stringhe tecniche tipo "android.permission.ACCESS_FINE_LOCATION".
+const PERMISSION_LABELS = {
+  'android.permission.ACCESS_FINE_LOCATION': 'Posizione',
+  'android.permission.ACCESS_COARSE_LOCATION': 'Posizione',
+  'android.permission.NEARBY_WIFI_DEVICES': 'Dispositivi WiFi nelle vicinanze',
+};
+
+// Verifica (e se serve richiede) tutto ciò che Android pretende per
+// leggere/scansionare le reti WiFi. Restituisce { ok: true } oppure
+// { ok: false, reason, actionLabel, openSettings } dove:
+//   - reason: spiegazione in italiano di cosa manca, mostrabile così com'è
+//   - actionLabel: testo del pulsante che porta l'utente a risolvere
+//   - openSettings: azione collegata a quel pulsante
+// Ci sono tre cause distinte, ognuna con la propria azione dedicata:
+//   1) permessi app non concessi (richiesti qui; se Android li blocca
+//      definitivamente si può solo passare dalle impostazioni dell'app)
+//   2) Servizi di localizzazione di sistema spenti
+//   3) WiFi del telefono spento
 export async function ensurePermissions() {
   if (Platform.OS !== 'android') return { ok: true };
 
@@ -27,32 +47,55 @@ export async function ensurePermissions() {
   ];
 
   // NEARBY_WIFI_DEVICES esiste solo da API 33 in su: richiederlo su versioni
-  // precedenti causa l'errore nativo "permission is null" che stai vedendo.
+  // precedenti causa l'errore nativo "permission is null".
   if (apiLevel >= 33) {
     permissionsToRequest.push(NEARBY_WIFI_DEVICES);
   }
 
   const granted = await PermissionsAndroid.requestMultiple(permissionsToRequest);
 
-  const denied = Object.entries(granted).filter(
-    ([, v]) => v !== PermissionsAndroid.RESULTS.GRANTED
-  );
+  const denied = Object.entries(granted).filter(([, v]) => v !== PermissionsAndroid.RESULTS.GRANTED);
 
   if (denied.length > 0) {
+    const names = [...new Set(denied.map(([k]) => PERMISSION_LABELS[k] || k))];
     return {
       ok: false,
-      reason: `Permessi negati: ${denied.map(([k]) => k).join(', ')}.`,
+      reason: `Per cercare e collegarsi alla rete della penna servono questi permessi: ${names.join(', ')}. Concedili dalle impostazioni dell'app.`,
+      actionLabel: "Apri impostazioni dell'app",
       openSettings: () => Linking.openSettings(),
     };
   }
 
-  // La scansione WiFi su Android richiede anche i Location Services attivi
-  // a livello di sistema (non basta il permesso concesso): se sono spenti,
-  // loadWifiList() fallisce con errori poco chiari.
+  // Oltre al PERMESSO (concesso sopra), Android richiede che i Servizi di
+  // localizzazione di sistema siano ACCESI per poter scansionare/leggere
+  // reti WiFi: sono due cose distinte, un permesso concesso con la
+  // localizzazione spenta fallisce comunque con errori poco chiari lato
+  // libreria nativa.
+  try {
+    const servicesEnabled = await Location.hasServicesEnabledAsync();
+    if (!servicesEnabled) {
+      return {
+        ok: false,
+        reason: 'I Servizi di localizzazione del telefono sono disattivati: Android li richiede per cercare le reti WiFi. Attivali e poi torna qui.',
+        actionLabel: 'Attiva la localizzazione',
+        openSettings: () =>
+          Linking.sendIntent('android.settings.LOCATION_SOURCE_SETTINGS').catch(() => Linking.openSettings()),
+      };
+    }
+  } catch (e) {
+    // Se il controllo stesso fallisce non blocchiamo l'utente qui: lo scan
+    // darà comunque un errore se il problema era davvero questo.
+  }
+
   try {
     const wifiEnabled = await WifiManager.isEnabled();
     if (!wifiEnabled) {
-      return { ok: false, reason: 'Il WiFi del telefono è spento. Attivalo e riprova.' };
+      return {
+        ok: false,
+        reason: 'Il WiFi del telefono è spento. Attivalo per collegarti alla rete della penna.',
+        actionLabel: 'Apri impostazioni WiFi',
+        openSettings: () => openWifiSettings(),
+      };
     }
   } catch (e) {
     // isEnabled può non essere disponibile su tutte le versioni: non blocchiamo per questo
@@ -136,6 +179,15 @@ export async function withMobileNetwork(fn, ssidPrefix) {
     return fn();
   }
 
+  // Se NON si è sulla rete della penna, la rete attuale è quella normale
+  // del telefono (con internet): forzare i dati mobili sarebbe inutile,
+  // consumerebbe traffico dati e, senza SIM/dati attivi, farebbe solo
+  // aspettare il timeout di requestCellular() prima di ogni chiamata.
+  const currentSsid = await getCurrentSSID();
+  if (!isPenNetwork(currentSsid, ssidPrefix)) {
+    return fn();
+  }
+
   try {
     await requestCellular(8000);
   } catch (e) {
@@ -183,9 +235,13 @@ export async function getCurrentSSID() {
   }
 }
 
-export function isPenNetwork(ssid, prefix = DEFAULT_SSID_PREFIX) {
-  if (!ssid || !prefix) return false;
-  return ssid.toLowerCase().startsWith(prefix.toLowerCase());
+export function isPenNetwork(ssid, prefix) {
+  // Prefisso vuoto/non impostato = default "Nax_" (le Impostazioni salvano
+  // una stringa vuota finché l'utente non lo personalizza: un parametro
+  // di default JS non scatterebbe, perché '' non è undefined).
+  const effectivePrefix = prefix || DEFAULT_SSID_PREFIX;
+  if (!ssid) return false;
+  return ssid.toLowerCase().startsWith(effectivePrefix.toLowerCase());
 }
 
 // Apre le impostazioni WiFi di sistema, così l'utente può connettersi
