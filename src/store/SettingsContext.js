@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { guessProviderFromEndpoint } from '../services/aiProviders';
+import { DEFAULT_SHELLY_ACTIONS } from '../services/shellyConstants';
 
 const STORAGE_KEY = '@pen_ai_telegram_settings_v1';
 
@@ -24,9 +25,30 @@ const DEFAULT_SETTINGS = {
     chatId: '',
   },
   remote: {
-    triggerKeyCode: 'VOLUME_UP', // tasto emulato dal telecomando BT
+    type: 'keys', // 'keys' = tasto tastiera/volume (schermo acceso) | 'shelly' = Shelly BLU Button1 (BLE)
+    triggerKeyCode: 'VOLUME_UP', // tasto emulato dal telecomando BT (type 'keys')
+    shelly: {
+      mac: '', // vuoto = pulsante non ancora "imparato"
+      actions: DEFAULT_SHELLY_ACTIONS, // evento -> 'none' | 'capture_send' | 'capture_only'
+    },
   },
 };
+
+// Merge della sezione remote, annidata su due livelli (shelly.actions):
+// un'impostazione salvata prima dell'introduzione di type/shelly non li ha,
+// e un merge superficiale li farebbe sparire insieme ai default.
+function mergeRemote(prev, incoming) {
+  const inc = incoming || {};
+  return {
+    ...prev,
+    ...inc,
+    shelly: {
+      ...prev.shelly,
+      ...(inc.shelly || {}),
+      actions: { ...prev.shelly.actions, ...((inc.shelly && inc.shelly.actions) || {}) },
+    },
+  };
+}
 
 const SettingsContext = createContext(null);
 
@@ -58,7 +80,7 @@ export function SettingsProvider({ children }) {
             pen: { ...prev.pen, ...(parsed.pen || {}) },
             ai: { ...prev.ai, ...(parsed.ai || {}) },
             telegram: { ...prev.telegram, ...(parsed.telegram || {}) },
-            remote: { ...prev.remote, ...(parsed.remote || {}) },
+            remote: mergeRemote(prev.remote, parsed.remote),
           }));
         }
       } catch (e) {
@@ -77,7 +99,7 @@ export function SettingsProvider({ children }) {
         pen: { ...prev.pen, ...(partial.pen || {}) },
         ai: { ...prev.ai, ...(partial.ai || {}) },
         telegram: { ...prev.telegram, ...(partial.telegram || {}) },
-        remote: { ...prev.remote, ...(partial.remote || {}) },
+        remote: mergeRemote(prev.remote, partial.remote),
       };
       AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next)).catch((e) =>
         console.warn('Errore salvataggio impostazioni', e)

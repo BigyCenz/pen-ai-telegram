@@ -1,0 +1,20 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Scansione BLE (Android 12+). Non uso "neverForLocation": quel flag
+       farebbe scartare al sistema i pacchetti considerati "beacon", e non
+       voglio rischiare di perdere gli advertising BTHome dello Shelly. -->
+  <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+  <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+  <!-- Servizio in primo piano per restare in ascolto a schermo spento. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+  <application>
+    <service
+      android:name="expo.modules.shellyble.ShellyScanService"
+      android:exported="false"
+      android:foregroundServiceType="connectedDevice" />
+  </application>
+</manifest>

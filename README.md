@@ -22,6 +22,33 @@ anche scattare e controllare la foto prima, e avviare l'invio solo quando vuoi.
 Le richieste verso AI e Telegram escono automaticamente sui **dati mobili**,
 anche mentre il WiFi resta agganciato alla penna (che non ha internet).
 
+## Telecomando Shelly BLU Button1 (BLE, anche a schermo spento)
+
+In **Impostazioni → Telecomando** scegli "Shelly BLU". Lo Shelly non si
+associa al telefono: a ogni pressione trasmette pacchetti BLE (BTHome v2) e
+l'app li legge con una scansione filtrata, tenuta viva da un servizio in
+primo piano (notifica fissa, wake lock, WiFi lock) definito nel modulo
+locale `modules/shelly-ble`.
+
+1. **Impara pulsante** → premi una volta il tasto: l'app salva il MAC e
+   ignora gli altri dispositivi BLE vicini (oppure inseriscilo a mano).
+2. Per ogni evento (singola, doppia, tripla, lunga, hold) scegli l'azione:
+   *Scatta e invia*, *Solo foto* o *Nessuna* (default: singola = scatta e
+   invia, lunga = solo foto).
+3. Tocca **Escludi l'app dall'ottimizzazione batteria** e consenti i permessi
+   Bluetooth/notifiche, altrimenti Android può fermare l'ascolto a schermo
+   spento.
+
+L'ascolto parte quando la sessione con la penna è connessa. Ogni evento
+ricevuto (e ogni errore di scansione) finisce nella schermata **Log**: al
+primo test a schermo spento controlla lì cosa arriva davvero, perché il
+comportamento del Bluetooth in background cambia da produttore a produttore.
+Il pulsante deve avere la cifratura BTHome disattivata.
+
+Serve una nuova build nativa (`npx expo prebuild --clean` + `run:android`):
+il modulo `shelly-ble` e i nuovi permessi non esistono nei dev client già
+installati.
+
 ## Build
 
 Il progetto usa moduli nativi (`react-native-wifi-reborn`,
