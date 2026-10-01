@@ -15,7 +15,8 @@ import { colors, spacing, typography, radius } from '../theme';
 import { usePenConnection, PEN_STATUS } from '../store/PenConnectionContext';
 
 export default function CaptureScreen({ navigation }) {
-  const { penStatus, capture, captureBusy, sendLastCapture, sendBusy, lastCapture } = usePenConnection();
+  const { penStatus, capture, captureBusy, captureError, sendLastCapture, sendBusy, sendError, lastCapture } =
+    usePenConnection();
 
   const connected = penStatus === PEN_STATUS.CONNECTED;
   const alreadySent = !!lastCapture?.aiText;
@@ -61,6 +62,11 @@ export default function CaptureScreen({ navigation }) {
           <Text style={[typography.subtitle, { marginTop: spacing(1.5), textAlign: 'center' }]}>
             {captureBusy ? 'Scatto in corso…' : 'Tocca per scattare (solo foto, nessun invio)'}
           </Text>
+          {captureError && (
+            <Text style={[typography.subtitle, { color: colors.danger, marginTop: spacing(1), textAlign: 'center' }]}>
+              {captureError}
+            </Text>
+          )}
         </Card>
       )}
 
@@ -88,6 +94,9 @@ export default function CaptureScreen({ navigation }) {
               <Text style={typography.label}>RISPOSTA AI</Text>
               <Text style={[typography.body, { marginTop: 6 }]}>{lastCapture.aiText}</Text>
             </View>
+          )}
+          {sendError && (
+            <Text style={[typography.subtitle, { color: colors.danger, marginTop: spacing(1) }]}>{sendError}</Text>
           )}
         </Card>
       )}

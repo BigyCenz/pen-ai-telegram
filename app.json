@@ -5,14 +5,23 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
     "splash": {
       "image": "./assets/splash.png",
       "backgroundColor": "#0F1115",
       "resizeMode": "contain"
     },
-    "plugins": ["expo-dev-client", "react-native-wifi-reborn"],
+    "plugins": [
+      "expo-dev-client",
+      "react-native-wifi-reborn",
+      "./plugins/withKeyEvent"
+    ],
     "android": {
       "package": "com.michele.penaitelegram",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon-foreground.png",
+        "backgroundImage": "./assets/adaptive-icon-background.png"
+      },
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
