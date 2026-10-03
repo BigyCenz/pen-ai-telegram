@@ -6,6 +6,13 @@ import Card from '../components/Card';
 import ConfigField from '../components/ConfigField';
 import { colors, spacing, typography, radius } from '../theme';
 import { AVAILABLE_TRIGGER_KEYS } from '../services/bluetoothRemoteListener';
+import { SHELLY_EVENTS, SHELLY_ACTIONS, normalizeMac, isValidMac } from '../services/shellyConstants';
+import {
+  learnShellyButton,
+  batteryOptimizationIgnored,
+  openBatteryOptimizationRequest,
+} from '../services/shellyRemoteListener';
+import { usePenConnection } from '../store/PenConnectionContext';
 import { validateSettings } from '../services/settingsValidation';
 import { AI_PROVIDERS, getProviderById } from '../services/aiProviders';
 import { fetchAvailableModels } from '../services/aiService';
@@ -13,7 +20,13 @@ import { withMobileNetwork } from '../services/wifiManager';
 
 export default function SettingsScreen() {
   const { settings, updateSettings } = useSettings();
+  const { pushLog } = usePenConnection();
   const [local, setLocal] = useState(settings);
+
+  // Telecomando Shelly: stato della procedura "impara pulsante".
+  const [learning, setLearning] = useState(false);
+  const [learnMsg, setLearnMsg] = useState(null);
+  const [batteryOk, setBatteryOk] = useState(() => batteryOptimizationIgnored());
 
   const [availableModels, setAvailableModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -37,11 +50,34 @@ export default function SettingsScreen() {
         model: (local.ai.model || '').trim(),
       },
       telegram: { botToken: local.telegram.botToken.trim(), chatId: local.telegram.chatId.trim() },
+      remote: {
+        ...local.remote,
+        shelly: { ...local.remote.shelly, mac: normalizeMac(local.remote.shelly.mac) },
+      },
     };
     setLocal(clean);
     updateSettings(clean);
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
+  };
+
+  const setRemote = (patch) => setLocal((s) => ({ ...s, remote: { ...s.remote, ...patch } }));
+  const setShelly = (patch) =>
+    setLocal((s) => ({ ...s, remote: { ...s.remote, shelly: { ...s.remote.shelly, ...patch } } }));
+
+  const learnButton = async () => {
+    setLearning(true);
+    setLearnMsg('In ascolto: premi una volta il pulsante Shelly, vicino al telefono (30 secondi)...');
+    try {
+      const mac = await learnShellyButton({ onLog: (m) => pushLog(`[Shelly] ${m}`) });
+      setShelly({ mac });
+      setLearnMsg(`Pulsante rilevato: ${mac}. Premi Salva per confermare.`);
+      pushLog(`[Shelly] pulsante imparato: ${mac}`);
+    } catch (e) {
+      setLearnMsg(e.message);
+    } finally {
+      setLearning(false);
+    }
   };
 
   const currentProvider = getProviderById(local.ai.provider);
@@ -119,20 +155,109 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={typography.label}>TELECOMANDO BLUETOOTH</Text>
+        <Text style={typography.label}>TELECOMANDO</Text>
         <View style={{ height: spacing(1) }} />
-        <Text style={typography.body}>Tasto trigger: {local.remote.triggerKeyCode}</Text>
         <View style={styles.chipRow}>
-          {AVAILABLE_TRIGGER_KEYS.map((k) => (
-            <TouchableOpacity
-              key={k}
-              style={[styles.chip, local.remote.triggerKeyCode === k && styles.chipActive]}
-              onPress={() => setLocal((s) => ({ ...s, remote: { ...s.remote, triggerKeyCode: k } }))}
-            >
-              <Text style={styles.chipText}>{k}</Text>
-            </TouchableOpacity>
-          ))}
+          <TouchableOpacity
+            style={[styles.chip, local.remote.type === 'shelly' && styles.chipActive]}
+            onPress={() => setRemote({ type: 'shelly' })}
+          >
+            <Text style={styles.chipText}>Shelly BLU (BLE, anche a schermo spento)</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.chip, local.remote.type !== 'shelly' && styles.chipActive]}
+            onPress={() => setRemote({ type: 'keys' })}
+          >
+            <Text style={styles.chipText}>Tasto tastiera/volume (solo schermo acceso)</Text>
+          </TouchableOpacity>
         </View>
+
+        {local.remote.type !== 'shelly' && (
+          <>
+            <Text style={[typography.body, { marginTop: spacing(1) }]}>
+              Tasto trigger: {local.remote.triggerKeyCode}
+            </Text>
+            <View style={styles.chipRow}>
+              {AVAILABLE_TRIGGER_KEYS.map((k) => (
+                <TouchableOpacity
+                  key={k}
+                  style={[styles.chip, local.remote.triggerKeyCode === k && styles.chipActive]}
+                  onPress={() => setRemote({ triggerKeyCode: k })}
+                >
+                  <Text style={styles.chipText}>{k}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </>
+        )}
+
+        {local.remote.type === 'shelly' && (
+          <>
+            <Text style={[typography.body, { marginTop: spacing(1) }]}>
+              Pulsante:{' '}
+              <Text style={{ fontWeight: '700' }}>
+                {isValidMac(local.remote.shelly.mac) ? normalizeMac(local.remote.shelly.mac) : '(non ancora imparato)'}
+              </Text>
+            </Text>
+            <View style={{ height: spacing(1) }} />
+            <TouchableOpacity
+              style={[styles.secondaryFilledBtn, learning && styles.btnDisabled]}
+              onPress={learnButton}
+              disabled={learning}
+            >
+              {learning ? (
+                <ActivityIndicator color={colors.text} />
+              ) : (
+                <Text style={styles.secondaryFilledBtnText}>Impara pulsante</Text>
+              )}
+            </TouchableOpacity>
+            {learnMsg && <Text style={[typography.subtitle, { marginTop: spacing(1) }]}>{learnMsg}</Text>}
+            <ConfigField
+              label="Oppure inserisci il MAC a mano"
+              value={local.remote.shelly.mac}
+              onChangeText={(v) => setShelly({ mac: v })}
+              placeholder="AA:BB:CC:DD:EE:FF"
+            />
+
+            <Text style={[typography.label, { marginTop: spacing(1) }]}>COSA FA OGNI EVENTO</Text>
+            {SHELLY_EVENTS.map((ev) => (
+              <View key={ev.id} style={{ marginTop: spacing(1) }}>
+                <Text style={typography.body}>{ev.label}</Text>
+                <View style={styles.chipRow}>
+                  {SHELLY_ACTIONS.map((a) => (
+                    <TouchableOpacity
+                      key={a.id}
+                      style={[styles.chip, local.remote.shelly.actions[ev.id] === a.id && styles.chipActive]}
+                      onPress={() =>
+                        setShelly({ actions: { ...local.remote.shelly.actions, [ev.id]: a.id } })
+                      }
+                    >
+                      <Text style={styles.chipText}>{a.label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            ))}
+
+            <Text style={[typography.subtitle, { marginTop: spacing(1) }]}>
+              L'ascolto parte quando la sessione con la penna è connessa e resta attivo a schermo spento
+              (notifica fissa). Ogni evento ricevuto viene scritto nel Log.
+            </Text>
+            <View style={{ height: spacing(1) }} />
+            <TouchableOpacity
+              style={[styles.secondaryFilledBtn, batteryOk && styles.btnDisabled]}
+              onPress={() => {
+                openBatteryOptimizationRequest();
+                setTimeout(() => setBatteryOk(batteryOptimizationIgnored()), 4000);
+              }}
+              disabled={batteryOk}
+            >
+              <Text style={styles.secondaryFilledBtnText}>
+                {batteryOk ? 'Ottimizzazione batteria già esclusa' : "Escludi l'app dall'ottimizzazione batteria"}
+              </Text>
+            </TouchableOpacity>
+          </>
+        )}
       </Card>
 
       <Card>

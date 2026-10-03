@@ -25,6 +25,7 @@ import {
 } from '../services/wifiManager';
 import { NaxclowClient, discoverDevice, extractDevIdFromSsid } from '../services/naxclowClient';
 import { startRemoteListener, stopRemoteListener } from '../services/bluetoothRemoteListener';
+import { startShellyListener, stopShellyListener } from '../services/shellyRemoteListener';
 import { captureSnapshot, sendImageThroughPipeline, runCaptureToTelegramFlow } from '../services/automationPipeline';
 import { validateSettings } from '../services/settingsValidation';
 import { useSettings } from './SettingsContext';
@@ -365,7 +366,9 @@ export function PenConnectionProvider({ children }) {
   // SOLO dal telecomando Bluetooth: lì non c'è una UI passo-passo da
   // aspettare, quindi l'automazione end-to-end resta quella richiesta in
   // origine per l'uso "sul campo".
-  const captureFromRemote = useCallback(async () => {
+  // mode: 'capture_send' (scatto -> AI -> Telegram, default) oppure
+  // 'capture_only' (solo foto, utile per es. sulla pressione lunga dello Shelly).
+  const captureFromRemote = useCallback(async (mode = 'capture_send') => {
     const client = clientRef.current;
     if (!client || penStatus !== PEN_STATUS.CONNECTED) {
       pushLog('Scatto da telecomando ignorato: nessuna sessione penna attiva.');
@@ -378,8 +381,12 @@ export function PenConnectionProvider({ children }) {
     setCaptureError(null);
     setSendError(null);
     try {
-      if (!valid) {
-        pushLog(`Impostazioni AI/Telegram incomplete (${problems.join(', ')}): scatto solo la foto.`);
+      if (!valid || mode === 'capture_only') {
+        if (mode === 'capture_only') {
+          pushLog('Telecomando: scatto solo la foto, senza invio.');
+        } else {
+          pushLog(`Impostazioni AI/Telegram incomplete (${problems.join(', ')}): scatto solo la foto.`);
+        }
         const imagePath = await captureSnapshot({ naxclowClient: client, onStatus: pushLog });
         setLastCapture({ imagePath, aiText: null, capturedAt: Date.now() });
         return;
@@ -400,13 +407,33 @@ export function PenConnectionProvider({ children }) {
     captureRef.current = captureFromRemote;
   }, [captureFromRemote]);
 
+  // Le azioni per evento Shelly si leggono da un ref, così cambiare la
+  // mappatura nelle Impostazioni vale subito, senza riavviare la scansione BLE.
+  const shellyActionsRef = useRef(settings.remote.shelly.actions);
   useEffect(() => {
-    if (penStatus === PEN_STATUS.CONNECTED) {
-      startRemoteListener(settings.remote.triggerKeyCode, () => captureRef.current());
-      return () => stopRemoteListener();
+    shellyActionsRef.current = settings.remote.shelly.actions;
+  }, [settings.remote.shelly.actions]);
+
+  useEffect(() => {
+    if (penStatus !== PEN_STATUS.CONNECTED) return undefined;
+
+    if (settings.remote.type === 'shelly') {
+      startShellyListener({
+        mac: settings.remote.shelly.mac,
+        onLog: (msg) => pushLog(`[Shelly] ${msg}`),
+        onEvent: (e) => {
+          const action = shellyActionsRef.current[e.event] || 'none';
+          pushLog(`[Shelly] ${e.event} da ${e.mac} (pacchetto ${e.packetId}, rssi ${e.rssi}) -> ${action}`);
+          if (action === 'none') return;
+          captureRef.current(action);
+        },
+      }).catch((err) => pushLog(`[Shelly] ascolto non avviato: ${err.message}`));
+      return () => stopShellyListener();
     }
-    return undefined;
-  }, [penStatus, settings.remote.triggerKeyCode]);
+
+    startRemoteListener(settings.remote.triggerKeyCode, () => captureRef.current());
+    return () => stopRemoteListener();
+  }, [penStatus, settings.remote.type, settings.remote.triggerKeyCode, settings.remote.shelly.mac, pushLog]);
 
   useEffect(() => {
     // Se il WiFi lascia la rete della penna mentre la sessione è attiva,
