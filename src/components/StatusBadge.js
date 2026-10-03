@@ -1,20 +1,22 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { colors, radius } from '../theme';
 
 const VARIANTS = {
-  idle: { bg: colors.surfaceAlt, dot: colors.textDim, label: 'In attesa' },
-  connecting: { bg: colors.primaryDim, dot: colors.primary, label: 'Connessione...' },
-  connected: { bg: '#153D2B', dot: colors.success, label: 'Connesso alla penna' },
-  error: { bg: '#3D1616', dot: colors.danger, label: 'Errore' },
+  idle: { bg: colors.surfaceHigh, fg: colors.textDim, icon: 'ellipse-outline', label: 'In attesa' },
+  connecting: { bg: colors.primarySoft, fg: colors.primary, icon: 'sync', label: 'Connessione...' },
+  connected: { bg: colors.successSoft, fg: colors.success, icon: 'checkmark-circle', label: 'Connesso' },
+  error: { bg: colors.dangerSoft, fg: colors.danger, icon: 'alert-circle', label: 'Errore' },
+  warning: { bg: colors.warningSoft, fg: colors.warning, icon: 'warning', label: 'Attenzione' },
 };
 
 export default function StatusBadge({ variant = 'idle', text }) {
   const v = VARIANTS[variant] || VARIANTS.idle;
   return (
     <View style={[styles.badge, { backgroundColor: v.bg }]}>
-      <View style={[styles.dot, { backgroundColor: v.dot }]} />
-      <Text style={styles.text}>{text || v.label}</Text>
+      <Ionicons name={v.icon} size={14} color={v.fg} />
+      <Text style={[styles.text, { color: v.fg }]}>{text || v.label}</Text>
     </View>
   );
 }
@@ -24,10 +26,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'flex-start',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: radius.md,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: radius.pill,
   },
-  dot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
-  text: { color: colors.text, fontSize: 13, fontWeight: '600' },
+  text: { fontSize: 12, fontWeight: '700', marginLeft: 5 },
 });

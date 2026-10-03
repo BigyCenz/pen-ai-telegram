@@ -305,7 +305,7 @@ export class NaxclowClient {
       this._lastRxAt = Date.now();
       try {
         // keepalive TCP del sistema, se la libreria lo supporta
-        if (typeof this.socket.setKeepAlive === 'function') this.socket.setKeepAlive(true, 5000);
+        if (typeof this.socket.setKeepAlive === 'function') this.socket.setKeepAlive(true);
       } catch (e) {
         // opzionale
       }

@@ -1,23 +1,61 @@
-// Schermata "Penna": gestisce SOLO i due passi di connessione, in ordine,
-// separati come richiesto:
-//   1) Stato WiFi: sei sulla rete della penna? Se no, invita a connettersi
-//      (senza nomi hardcoded: scansiona per prefisso o apre le impostazioni
-//      di sistema).
-//   2) Stato sessione penna: una volta sulla rete giusta, un pulsante avvia
-//      la sessione applicativa (discovery + login) e mostra i dati letti
-//      dal device.
-// Lo scatto vero e proprio vive nella tab "Cattura", il log dettagliato
-// nella tab "Log": qui restano solo un riepilogo di stato pensato per
-// essere letto a colpo d'occhio.
+// Schermata "Penna": cruscotto di connessione.
+//   - In alto una scheda di stato che si legge a colpo d'occhio (penna
+//     connessa / in connessione / offline, batteria, rete, telecomando).
+//   - Sotto, finché non si è connessi, i due passi in ordine: 1) rete WiFi
+//     della penna, 2) sessione applicativa (discovery + login).
+//   - A connessione avvenuta i passi spariscono e restano i dati del
+//     dispositivo in riquadri, con le azioni rapide.
+// Lo scatto vive nella tab "Scatta", il dettaglio diagnostico nel "Log".
 import React, { useEffect, useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
 import Card from '../components/Card';
-import SectionHeader from '../components/SectionHeader';
-import InfoRow from '../components/InfoRow';
-import StatusBadge from '../components/StatusBadge';
-import { colors, spacing, typography, radius } from '../theme';
+import Button from '../components/Button';
+import IconBadge from '../components/IconBadge';
+import StatTile from '../components/StatTile';
+import BatteryIndicator from '../components/BatteryIndicator';
+import { colors, spacing, typography, radius, gradients, tint } from '../theme';
 import { usePenConnection, WIFI_STATUS, PEN_STATUS } from '../store/PenConnectionContext';
+import { useSettings } from '../store/SettingsContext';
+import { isValidMac } from '../services/shellyConstants';
+
+// Piccola "pillola" informativa con icona, usata nella scheda di stato.
+function Pill({ icon, color = colors.textDim, children }) {
+  return (
+    <View style={[styles.pill, { backgroundColor: tint(color, 0.14) }]}>
+      <Ionicons name={icon} size={14} color={color} />
+      <Text style={[styles.pillText, { color }]} numberOfLines={1}>
+        {children}
+      </Text>
+    </View>
+  );
+}
+
+// Un passo della procedura: cerchio numerato (o spunta se completato) + titolo.
+function StepHeader({ n, done, active, title, subtitle }) {
+  return (
+    <View style={styles.stepHeader}>
+      <View
+        style={[
+          styles.stepCircle,
+          done && { backgroundColor: colors.success, borderColor: colors.success },
+          active && !done && { borderColor: colors.primary },
+        ]}
+      >
+        {done ? (
+          <Ionicons name="checkmark" size={16} color="#04201A" />
+        ) : (
+          <Text style={[styles.stepNum, active && { color: colors.primary }]}>{n}</Text>
+        )}
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={typography.sectionTitle}>{title}</Text>
+        {subtitle ? <Text style={[typography.caption, { marginTop: 2 }]}>{subtitle}</Text> : null}
+      </View>
+    </View>
+  );
+}
 
 export default function HomeScreen({ navigation }) {
   const {
@@ -32,17 +70,18 @@ export default function HomeScreen({ navigation }) {
     penStatus,
     penInfo,
     penError,
+    sessionDesired,
     connectPenSession,
     disconnectPenSession,
   } = usePenConnection();
+  const { settings } = useSettings();
 
   const [networks, setNetworks] = useState([]);
   const [scanning, setScanning] = useState(false);
 
   // Con la tab bar in uso ogni schermata viene rimontata a ogni cambio
-  // tab (non resta "in pausa" come con uno Stack Navigator), quindi un
-  // semplice effetto al mount basta per aggiornare lo stato WiFi ogni
-  // volta che l'utente torna su questa sezione.
+  // tab, quindi un semplice effetto al mount basta per aggiornare lo
+  // stato WiFi ogni volta che l'utente torna su questa sezione.
   useEffect(() => {
     refreshWifiStatus();
   }, [refreshWifiStatus]);
@@ -57,145 +96,207 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
-  const onWifiCardConnected = wifiStatus === WIFI_STATUS.PEN_NETWORK;
+  const onPenWifi = wifiStatus === WIFI_STATUS.PEN_NETWORK;
+  const connected = penStatus === PEN_STATUS.CONNECTED;
+  const connecting = penStatus === PEN_STATUS.CONNECTING;
+  const failed = penStatus === PEN_STATUS.ERROR;
+  const macOk = isValidMac(settings.remote.shelly.mac);
+
+  const hero = connected
+    ? { grad: gradients.heroConnected, icon: 'checkmark-circle', color: colors.success, title: 'Penna connessa' }
+    : connecting
+      ? { grad: gradients.hero, icon: 'sync', color: colors.primary, title: sessionDesired ? 'Riconnessione…' : 'Connessione…' }
+      : failed
+        ? { grad: gradients.heroError, icon: 'alert-circle', color: colors.danger, title: 'Connessione non riuscita' }
+        : { grad: gradients.hero, icon: 'power', color: colors.textDim, title: 'Penna non connessa' };
+
+  const heroSubtitle = connected
+    ? penInfo?.devName || penInfo?.devId || 'Sessione attiva'
+    : connecting
+      ? penError || 'Un attimo, sto contattando la penna'
+      : failed
+        ? penError
+        : onPenWifi
+          ? 'WiFi pronto: avvia la sessione'
+          : 'Collegati prima al WiFi della penna';
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <LinearGradient
-        colors={[colors.primary, colors.primaryDim]}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.header}
-      >
-        <Text style={styles.headerTitle}>Pen AI → Telegram</Text>
-        <Text style={styles.headerSubtitle}>Connessione alla penna, passo per passo</Text>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      {/* SCHEDA DI STATO */}
+      <LinearGradient colors={hero.grad} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.hero}>
+        <View style={styles.heroTop}>
+          <View style={[styles.heroIcon, { backgroundColor: tint(hero.color, 0.16), borderColor: tint(hero.color, 0.4) }]}>
+            {connecting ? (
+              <ActivityIndicator color={hero.color} />
+            ) : (
+              <Ionicons name={hero.icon} size={30} color={hero.color} />
+            )}
+          </View>
+          <View style={{ flex: 1, marginLeft: spacing(2) }}>
+            <Text style={styles.heroTitle}>{hero.title}</Text>
+            <Text style={styles.heroSubtitle} numberOfLines={2}>
+              {heroSubtitle}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.pills}>
+          {connected && penInfo?.battery != null ? (
+            <View style={[styles.pill, { backgroundColor: 'rgba(255,255,255,0.06)' }]}>
+              <BatteryIndicator level={penInfo.battery} size={16} textStyle={{ fontSize: 12 }} />
+            </View>
+          ) : null}
+          <Pill icon={onPenWifi ? 'wifi' : 'wifi-outline'} color={onPenWifi ? colors.accentWifi : colors.textDim}>
+            {onPenWifi ? currentSsid || 'Rete penna' : 'WiFi penna assente'}
+          </Pill>
+          <Pill
+            icon="bluetooth"
+            color={sessionDesired && macOk ? colors.accentBle : macOk ? colors.textDim : colors.warning}
+          >
+            {!macOk ? 'Telecomando da imparare' : sessionDesired ? 'Telecomando attivo' : 'Telecomando in pausa'}
+          </Pill>
+        </View>
       </LinearGradient>
 
-      {/* STEP 1: rete WiFi */}
-      <Card>
-        <SectionHeader
-          title="1 · Rete WiFi"
-          subtitle="La penna crea una rete propria a cui il telefono deve associarsi"
-          right={
-            <StatusBadge
-              variant={onWifiCardConnected ? 'connected' : 'idle'}
-              text={onWifiCardConnected ? 'Rete penna' : 'Non connesso'}
-            />
-          }
-        />
-
-        {currentSsid ? (
-          <Text style={[typography.body, { marginBottom: spacing(1) }]}>
-            Rete attuale: <Text style={{ fontWeight: '700' }}>{currentSsid}</Text>
-          </Text>
-        ) : !permissionIssue ? (
-          <Text style={[typography.subtitle, { marginBottom: spacing(1) }]}>
-            Nessuna rete WiFi rilevata.
-          </Text>
-        ) : null}
-
-        {!onWifiCardConnected && permissionIssue && (
-          <View style={styles.warnBox}>
-            <Text style={styles.warnTitle}>Serve un tuo intervento</Text>
-            <Text style={styles.warnText}>{permissionIssue.reason}</Text>
-            <TouchableOpacity style={styles.warnBtn} onPress={permissionIssue.openSettings}>
-              <Text style={styles.warnBtnText}>{permissionIssue.actionLabel || 'Apri impostazioni'}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.secondaryBtn} onPress={refreshWifiStatus}>
-              <Text style={styles.secondaryBtnText}>Ho sistemato · riprova</Text>
-            </TouchableOpacity>
+      {connected ? (
+        <>
+          {/* DATI DISPOSITIVO */}
+          <View style={styles.sectionLabelRow}>
+            <Text style={typography.label}>DISPOSITIVO</Text>
           </View>
-        )}
+          <View style={styles.grid}>
+            <StatTile icon="battery-full" color={colors.success} label="Batteria">
+              <BatteryIndicator level={penInfo?.battery} size={20} textStyle={{ fontSize: 16 }} />
+            </StatTile>
+            <StatTile icon="cube-outline" color={colors.primary} label="Modello" value={penInfo?.devModel} />
+            <StatTile icon="code-slash-outline" color={colors.accentAi} label="Firmware" value={penInfo?.firmwareVersion} />
+            <StatTile icon="wifi-outline" color={colors.accentWifi} label="WiFi penna" value={penInfo?.wifiName} />
+          </View>
+          <Card elevated={false} style={{ paddingVertical: spacing(1.5) }}>
+            <View style={styles.idRow}>
+              <IconBadge name="finger-print" color={colors.textDim} size={34} />
+              <View style={{ marginLeft: spacing(1.5), flex: 1 }}>
+                <Text style={typography.caption}>Device ID</Text>
+                <Text style={styles.idValue} numberOfLines={1}>
+                  {penInfo?.devId || '—'}
+                </Text>
+              </View>
+            </View>
+          </Card>
 
-        {!onWifiCardConnected && !permissionIssue && (
-          <>
-            <Text style={[typography.subtitle, { marginBottom: spacing(1.5) }]}>
-              Connettiti a una rete che inizia con "{ssidPrefix}" (il prefisso è configurabile nelle Impostazioni).
-            </Text>
+          <Button
+            label="Vai a Scatta"
+            icon="camera"
+            onPress={() => navigation.navigate('Capture')}
+            style={{ marginBottom: spacing(1.5) }}
+          />
+          <Button label="Termina sessione" icon="power" variant="danger" onPress={disconnectPenSession} />
+        </>
+      ) : (
+        <>
+          {/* PASSO 1 · WIFI */}
+          <Card>
+            <StepHeader
+              n={1}
+              done={onPenWifi}
+              active={!onPenWifi}
+              title="Rete WiFi della penna"
+              subtitle={onPenWifi ? currentSsid : 'La penna crea una rete propria: il telefono deve associarsi'}
+            />
 
-            <TouchableOpacity style={styles.primaryBtn} onPress={handleScan} disabled={scanning}>
-              {scanning ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.primaryBtnText}>Cerca reti della penna</Text>
-              )}
-            </TouchableOpacity>
-
-            {networks.length > 0 && (
-              <View style={{ marginTop: spacing(1.5) }}>
-                {networks.map((n) => (
-                  <TouchableOpacity
-                    key={n.BSSID || n.SSID}
-                    style={styles.networkRow}
-                    onPress={() => joinPenNetwork(n.SSID)}
-                    disabled={wifiBusy}
-                  >
-                    <Text style={typography.body}>{n.SSID}</Text>
-                    <Text style={typography.subtitle}>Connetti →</Text>
-                  </TouchableOpacity>
-                ))}
+            {!onPenWifi && permissionIssue && (
+              <View style={styles.warnBox}>
+                <View style={styles.warnHead}>
+                  <Ionicons name="warning" size={18} color={colors.warning} />
+                  <Text style={styles.warnTitle}>Serve un tuo intervento</Text>
+                </View>
+                <Text style={styles.warnText}>{permissionIssue.reason}</Text>
+                <Button
+                  label={permissionIssue.actionLabel || 'Apri impostazioni'}
+                  variant="warning"
+                  onPress={permissionIssue.openSettings}
+                  compact
+                />
+                <Button
+                  label="Ho sistemato · riprova"
+                  variant="ghost"
+                  onPress={refreshWifiStatus}
+                  compact
+                  style={{ marginTop: 4 }}
+                />
               </View>
             )}
 
-            <TouchableOpacity style={styles.secondaryBtn} onPress={refreshWifiStatus}>
-              <Text style={styles.secondaryBtnText}>Mi sono già connesso dalle impostazioni · aggiorna stato</Text>
-            </TouchableOpacity>
-          </>
-        )}
-      </Card>
+            {!onPenWifi && !permissionIssue && (
+              <>
+                <Text style={[typography.subtitle, { marginBottom: spacing(1.5) }]}>
+                  Cerca una rete che inizia con "{ssidPrefix}" (il prefisso si cambia nelle Impostazioni).
+                </Text>
+                <Button label="Cerca reti della penna" icon="search-outline" onPress={handleScan} loading={scanning} />
 
-      {/* STEP 2: sessione applicativa penna */}
-      <Card>
-        <SectionHeader
-          title="2 · Sessione penna"
-          subtitle="Login e lettura dati dal device"
-          right={
-            <StatusBadge
-              variant={penStatus === PEN_STATUS.CONNECTED ? 'connected' : penStatus === PEN_STATUS.CONNECTING ? 'connecting' : penStatus === PEN_STATUS.ERROR ? 'error' : 'idle'}
+                {networks.length > 0 && (
+                  <View style={{ marginTop: spacing(1.5) }}>
+                    {networks.map((n) => (
+                      <TouchableOpacity
+                        key={n.BSSID || n.SSID}
+                        style={styles.networkRow}
+                        onPress={() => joinPenNetwork(n.SSID)}
+                        disabled={wifiBusy}
+                        activeOpacity={0.7}
+                      >
+                        <IconBadge name="wifi" color={colors.accentWifi} size={34} />
+                        <Text style={[typography.body, { flex: 1, marginLeft: spacing(1.5) }]}>{n.SSID}</Text>
+                        {wifiBusy ? (
+                          <ActivityIndicator color={colors.primary} />
+                        ) : (
+                          <Ionicons name="chevron-forward" size={18} color={colors.textDim} />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+
+                <Button
+                  label="Già connesso dalle impostazioni · aggiorna"
+                  variant="ghost"
+                  icon="refresh"
+                  onPress={refreshWifiStatus}
+                  compact
+                  style={{ marginTop: spacing(1) }}
+                />
+              </>
+            )}
+          </Card>
+
+          {/* PASSO 2 · SESSIONE */}
+          <Card style={!onPenWifi && styles.dimmed}>
+            <StepHeader
+              n={2}
+              done={false}
+              active={onPenWifi}
+              title="Sessione con la penna"
+              subtitle="Login e lettura dati dal dispositivo"
             />
-          }
-        />
-
-        {!onWifiCardConnected ? (
-          <Text style={typography.subtitle}>Completa prima il passo 1: connettiti alla rete della penna.</Text>
-        ) : penStatus === PEN_STATUS.CONNECTED ? (
-          <>
-            <InfoRow label="Modello" value={penInfo?.devModel} />
-            <InfoRow label="Nome device" value={penInfo?.devName} />
-            <InfoRow label="Device ID" value={penInfo?.devId} />
-            <InfoRow label="Batteria" value={penInfo?.battery != null ? `${penInfo.battery}%` : null} />
-            <InfoRow label="Firmware" value={penInfo?.firmwareVersion} />
-            <InfoRow label="WiFi penna" value={penInfo?.wifiName} />
-
-            <TouchableOpacity style={[styles.dangerBtn, { marginTop: spacing(2) }]} onPress={disconnectPenSession}>
-              <Text style={styles.primaryBtnText}>Termina sessione</Text>
-            </TouchableOpacity>
-          </>
-        ) : (
-          <>
-            <TouchableOpacity
-              style={[styles.primaryBtn, penStatus === PEN_STATUS.CONNECTING && styles.btnDisabled]}
-              onPress={connectPenSession}
-              disabled={penStatus === PEN_STATUS.CONNECTING}
-            >
-              {penStatus === PEN_STATUS.CONNECTING ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.primaryBtnText}>Connetti alla penna</Text>
-              )}
-            </TouchableOpacity>
-            {penError && <Text style={[typography.subtitle, { color: colors.danger, marginTop: spacing(1) }]}>{penError}</Text>}
-          </>
-        )}
-      </Card>
-
-      {penStatus === PEN_STATUS.CONNECTED && (
-        <Card>
-          <SectionHeader title="Pronto" subtitle="Vai alla sezione Cattura per scattare, o usa il telecomando Bluetooth" />
-          <TouchableOpacity style={styles.secondaryFilledBtn} onPress={() => navigation.navigate('Capture')}>
-            <Text style={styles.primaryBtnText}>Vai a Cattura →</Text>
-          </TouchableOpacity>
-        </Card>
+            {!onPenWifi ? (
+              <Text style={typography.subtitle}>Completa prima il passo 1.</Text>
+            ) : (
+              <>
+                <Button
+                  label={connecting ? 'Connessione…' : 'Connetti alla penna'}
+                  icon="link"
+                  onPress={connectPenSession}
+                  loading={connecting}
+                />
+                {penError && !connecting ? (
+                  <View style={styles.errorBox}>
+                    <Ionicons name="alert-circle" size={18} color={colors.danger} />
+                    <Text style={styles.errorText}>{penError}</Text>
+                  </View>
+                ) : null}
+              </>
+            )}
+          </Card>
+        </>
       )}
     </ScrollView>
   );
@@ -203,57 +304,84 @@ export default function HomeScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
-  content: { padding: spacing(2.5), paddingBottom: spacing(6) },
-  header: {
-    borderRadius: radius.lg,
-    padding: spacing(3),
-    marginBottom: spacing(2),
-  },
-  headerTitle: { fontSize: 24, fontWeight: '800', color: '#fff' },
-  headerSubtitle: { fontSize: 13, color: 'rgba(255,255,255,0.85)', marginTop: 4 },
-  primaryBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  secondaryFilledBtn: {
-    backgroundColor: colors.primaryDim,
-    borderRadius: radius.md,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  secondaryBtn: { alignItems: 'center', paddingVertical: 10, marginTop: 4 },
-  secondaryBtnText: { color: colors.textDim, fontSize: 13, textDecorationLine: 'underline' },
-  dangerBtn: {
-    backgroundColor: colors.danger,
-    borderRadius: radius.md,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  btnDisabled: { opacity: 0.6 },
-  warnBox: {
-    backgroundColor: 'rgba(251,191,36,0.10)',
+  content: { padding: spacing(2.5), paddingBottom: spacing(5) },
+
+  hero: {
+    borderRadius: radius.xl,
+    padding: spacing(2.5),
+    marginBottom: spacing(2.5),
     borderWidth: 1,
-    borderColor: colors.warning,
+    borderColor: colors.borderSoft,
+  },
+  heroTop: { flexDirection: 'row', alignItems: 'center' },
+  heroIcon: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroTitle: { fontSize: 20, fontWeight: '800', color: colors.text, letterSpacing: -0.3 },
+  heroSubtitle: { fontSize: 13, color: colors.textDim, marginTop: 3, lineHeight: 18 },
+  pills: { flexDirection: 'row', flexWrap: 'wrap', marginTop: spacing(2), marginRight: -6 },
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: radius.pill,
+    marginRight: 6,
+    marginBottom: 6,
+    maxWidth: '100%',
+  },
+  pillText: { fontSize: 12, fontWeight: '700', marginLeft: 5 },
+
+  sectionLabelRow: { marginBottom: spacing(1), marginLeft: 4 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
+  idRow: { flexDirection: 'row', alignItems: 'center' },
+  idValue: { ...typography.mono, fontSize: 14, marginTop: 2 },
+
+  stepHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing(2) },
+  stepCircle: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 2,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing(1.5),
+  },
+  stepNum: { color: colors.textDim, fontWeight: '800', fontSize: 13 },
+  dimmed: { opacity: 0.6 },
+
+  networkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderSoft,
+  },
+
+  warnBox: {
+    backgroundColor: colors.warningSoft,
+    borderWidth: 1,
+    borderColor: 'rgba(251,191,36,0.35)',
     borderRadius: radius.md,
     padding: spacing(2),
   },
-  warnTitle: { color: colors.warning, fontWeight: '700', fontSize: 14, marginBottom: 4 },
+  warnHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
+  warnTitle: { color: colors.warning, fontWeight: '700', fontSize: 14, marginLeft: 8 },
   warnText: { color: colors.text, fontSize: 14, lineHeight: 20, marginBottom: spacing(1.5) },
-  warnBtn: {
-    backgroundColor: colors.warning,
-    borderRadius: radius.md,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  warnBtnText: { color: '#1A1300', fontWeight: '700', fontSize: 14 },
-  primaryBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
-  networkRow: {
+
+  errorBox: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    alignItems: 'flex-start',
+    backgroundColor: colors.dangerSoft,
+    borderRadius: radius.md,
+    padding: spacing(1.5),
+    marginTop: spacing(1.5),
   },
+  errorText: { color: colors.text, fontSize: 13, lineHeight: 19, marginLeft: 8, flex: 1 },
 });

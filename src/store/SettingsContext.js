@@ -25,8 +25,7 @@ const DEFAULT_SETTINGS = {
     chatId: '',
   },
   remote: {
-    type: 'keys', // 'keys' = tasto tastiera/volume (schermo acceso) | 'shelly' = Shelly BLU Button1 (BLE)
-    triggerKeyCode: 'VOLUME_UP', // tasto emulato dal telecomando BT (type 'keys')
+    type: 'shelly', // unico telecomando supportato: Shelly BLU Button1 (BLE, anche a schermo spento)
     shelly: {
       mac: '', // vuoto = pulsante non ancora "imparato"
       actions: DEFAULT_SHELLY_ACTIONS, // evento -> 'none' | 'capture_send' | 'capture_only'
@@ -42,6 +41,9 @@ function mergeRemote(prev, incoming) {
   return {
     ...prev,
     ...inc,
+    // Il vecchio telecomando a tasti (volume/tastiera) è stato rimosso: le
+    // impostazioni salvate con type 'keys' passano a Shelly.
+    type: 'shelly',
     shelly: {
       ...prev.shelly,
       ...(inc.shelly || {}),

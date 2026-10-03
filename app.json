@@ -13,8 +13,7 @@
     },
     "plugins": [
       "expo-dev-client",
-      "react-native-wifi-reborn",
-      "./plugins/withKeyEvent"
+      "react-native-wifi-reborn"
     ],
     "android": {
       "package": "com.michele.penaitelegram",

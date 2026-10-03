@@ -1,7 +1,9 @@
 import './src/polyfills';
 import React, { useState } from 'react';
-import { View, StyleSheet } from 'react-native';
+import { View, StyleSheet, StatusBar } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { useFonts } from 'expo-font';
+import { Ionicons } from '@expo/vector-icons';
 import { SettingsProvider } from './src/store/SettingsContext';
 import { PenConnectionProvider } from './src/store/PenConnectionContext';
 import HomeScreen from './src/screens/HomeScreen';
@@ -24,6 +26,8 @@ const SCREENS = {
 
 export default function App() {
   const [activeKey, setActiveKey] = useState('Home');
+  // Le icone sono un font: aspetto che sia caricato per non vedere riquadri vuoti al primo avvio.
+  const [fontsLoaded] = useFonts(Ionicons.font);
 
   const navigation = {
     navigate: (key) => setActiveKey(key),
@@ -31,8 +35,11 @@ export default function App() {
 
   const ActiveScreen = SCREENS[activeKey] || HomeScreen;
 
+  if (!fontsLoaded) return <View style={styles.root} />;
+
   return (
     <SafeAreaProvider>
+      <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
       <SettingsProvider>
         <PenConnectionProvider>
           <SafeAreaView style={styles.root} edges={['top']}>

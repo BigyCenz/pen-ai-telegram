@@ -24,7 +24,6 @@ import {
   DEFAULT_SSID_PREFIX,
 } from '../services/wifiManager';
 import { NaxclowClient, discoverDevice, extractDevIdFromSsid } from '../services/naxclowClient';
-import { startRemoteListener, stopRemoteListener } from '../services/bluetoothRemoteListener';
 import { startShellyListener, stopShellyListener } from '../services/shellyRemoteListener';
 import { captureSnapshot, sendImageThroughPipeline, runCaptureToTelegramFlow } from '../services/automationPipeline';
 import { validateSettings } from '../services/settingsValidation';
@@ -415,7 +414,6 @@ export function PenConnectionProvider({ children }) {
     sessionDesiredRef.current = false;
     setSessionDesired(false);
     pendingRemoteRef.current = null;
-    stopRemoteListener();
     if (clientRef.current) {
       clientRef.current.close();
       clientRef.current = null;
@@ -554,27 +552,22 @@ export function PenConnectionProvider({ children }) {
   }, [settings.remote.shelly.actions]);
 
   useEffect(() => {
-    // Il telecomando resta in ascolto per tutta la sessione voluta, anche
-    // durante una riconnessione automatica.
+    // Il telecomando Shelly resta in ascolto per tutta la sessione voluta,
+    // anche durante una riconnessione automatica.
     if (!sessionDesired) return undefined;
 
-    if (settings.remote.type === 'shelly') {
-      startShellyListener({
-        mac: settings.remote.shelly.mac,
-        onLog: (msg) => pushLog(`[Shelly] ${msg}`),
-        onEvent: (e) => {
-          const action = shellyActionsRef.current[e.event] || 'none';
-          pushLog(`[Shelly] ${e.event} da ${e.mac} (pacchetto ${e.packetId}, rssi ${e.rssi}) -> ${action}`);
-          if (action === 'none') return;
-          captureRef.current(action);
-        },
-      }).catch((err) => pushLog(`[Shelly] ascolto non avviato: ${err.message}`));
-      return () => stopShellyListener();
-    }
-
-    startRemoteListener(settings.remote.triggerKeyCode, () => captureRef.current());
-    return () => stopRemoteListener();
-  }, [sessionDesired, settings.remote.type, settings.remote.triggerKeyCode, settings.remote.shelly.mac, pushLog]);
+    startShellyListener({
+      mac: settings.remote.shelly.mac,
+      onLog: (msg) => pushLog(`[Shelly] ${msg}`),
+      onEvent: (e) => {
+        const action = shellyActionsRef.current[e.event] || 'none';
+        pushLog(`[Shelly] ${e.event} da ${e.mac} (pacchetto ${e.packetId}, rssi ${e.rssi}) -> ${action}`);
+        if (action === 'none') return;
+        captureRef.current(action);
+      },
+    }).catch((err) => pushLog(`[Shelly] ascolto non avviato: ${err.message}`));
+    return () => stopShellyListener();
+  }, [sessionDesired, settings.remote.shelly.mac, pushLog]);
 
   // NOTA: non chiudo più la sessione quando l'SSID letto non è della penna.
   // In background/a schermo spento Android può non restituire l'SSID, e
@@ -600,6 +593,7 @@ export function PenConnectionProvider({ children }) {
     joinPenNetwork,
     leavePenNetwork,
     // pen session
+    sessionDesired,
     penStatus,
     penInfo,
     penError,
