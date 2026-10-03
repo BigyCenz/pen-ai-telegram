@@ -98,6 +98,20 @@ export function PenConnectionProvider({ children }) {
 
   const [log, setLog] = useState([]);
   const clientRef = useRef(null);
+  // La sessione è "voluta" dal momento in cui l'utente si connette fino a
+  // quando si disconnette esplicitamente. Finché è voluta, se la penna
+  // sparisce (WiFi caduto, penna riavviata) l'app prova a riconnettersi da
+  // sola, e il telecomando BLE resta in ascolto.
+  const [sessionDesired, setSessionDesired] = useState(false);
+  const sessionDesiredRef = useRef(false);
+  const recoveringRef = useRef(false);
+  const lastPenSsidRef = useRef(null);
+  const currentSsidRef = useRef(null);
+  const settingsRef = useRef(settings);
+  // Scatto richiesto dal telecomando mentre la sessione era caduta: viene
+  // eseguito appena la riconnessione riesce (se non è passato troppo tempo).
+  const pendingRemoteRef = useRef(null);
+  const handleLostRef = useRef(() => {});
   const lastDisconnectAtRef = useRef(0);
   // Ref sempre aggiornato all'ultima versione di capture(): usato dal
   // listener del telecomando Bluetooth per evitare di dover
@@ -114,6 +128,15 @@ export function PenConnectionProvider({ children }) {
   const clearLog = useCallback(() => setLog([]), []);
 
   const ssidPrefix = settings.pen.ssidPrefix || DEFAULT_SSID_PREFIX;
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    currentSsidRef.current = currentSsid;
+    if (currentSsid && isPenNetwork(currentSsid, ssidPrefix)) lastPenSsidRef.current = currentSsid;
+  }, [currentSsid, ssidPrefix]);
 
   // Controlla lo stato WiFi corrente rispetto alla rete della penna. Va
   // richiamata ad ogni focus della Home e quando l'app torna in foreground,
@@ -193,19 +216,14 @@ export function PenConnectionProvider({ children }) {
 
   // --- Sessione applicativa verso la penna (richiede WIFI_STATUS.PEN_NETWORK) ---
 
-  // Non rilancia l'errore: viene chiamata direttamente da un onPress in UI
-  // (nessun chiamante è pronto a gestire un reject a valle). Lo stato di
-  // errore è già esposto tramite penStatus/penError per la UI.
-  const connectPenSession = useCallback(async () => {
-    if (wifiStatus !== WIFI_STATUS.PEN_NETWORK) {
-      setPenError('Non sei connesso alla rete della penna: connettiti prima al WiFi.');
-      setPenStatus(PEN_STATUS.ERROR);
-      return;
-    }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-    const deviceIp = settings.pen.ip || DEFAULT_PEN_IP;
-    setPenStatus(PEN_STATUS.CONNECTING);
-    setPenError(null);
+  // Apre la sessione TCP verso la penna (discovery, handshake, login) con
+  // fino a maxAttempts tentativi. Non guarda lo stato WiFi in React (che può
+  // essere vecchio): chi la chiama sa già di essere sulla rete giusta.
+  // Se riesce, aggiorna lo stato e registra l'ascolto della perdita sessione.
+  const establishSession = useCallback(async ({ maxAttempts = 3 } = {}) => {
+    const deviceIp = settingsRef.current.pen.ip || DEFAULT_PEN_IP;
 
     // Rispetta un breve cooldown se una sessione precedente è stata chiusa
     // da poco: vedi commento su RECONNECT_COOLDOWN_MS per il perché.
@@ -213,27 +231,21 @@ export function PenConnectionProvider({ children }) {
     if (lastDisconnectAtRef.current > 0 && msSinceDisconnect < RECONNECT_COOLDOWN_MS) {
       const waitMs = RECONNECT_COOLDOWN_MS - msSinceDisconnect;
       pushLog(`Attendo ${Math.ceil(waitMs / 100) / 10}s prima di riconnettermi (la sessione precedente si è appena chiusa)...`);
-      await new Promise((r) => setTimeout(r, waitMs));
+      await sleep(waitMs);
     }
 
-    // Fino a 3 tentativi complessivi: l'handshake iniziale (ping/pong) può
-    // fallire per flakiness momentanea dello stack TCP embedded della
-    // penna, soprattutto subito dopo una sessione precedente — un retry
-    // automatico risolve la maggior parte di questi casi senza che
-    // l'utente debba accorgersene o premere di nuovo "Connetti".
-    const MAX_ATTEMPTS = 3;
     let lastError = null;
     // Esito della discovery, conservato tra un tentativo e l'altro: una
     // volta ottenuto il devId non serve richiederlo di nuovo ai retry.
     let devId = null;
     let discoveryInfo = null;
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       let client = null;
       try {
         if (attempt > 1) {
-          pushLog(`Nuovo tentativo di connessione (${attempt}/${MAX_ATTEMPTS})...`);
-          await new Promise((r) => setTimeout(r, 1000 * attempt));
+          pushLog(`Nuovo tentativo di connessione (${attempt}/${maxAttempts})...`);
+          await sleep(1000 * attempt);
         }
 
         if (!discoveryInfo) {
@@ -243,12 +255,12 @@ export function PenConnectionProvider({ children }) {
             devId = discoveryInfo.devId;
             pushLog(`Penna identificata: ${discoveryInfo.devName || devId} (batteria ${discoveryInfo.battery ?? '?'}%)`);
           } catch (e) {
-            devId = devId || extractDevIdFromSsid(currentSsid);
+            devId = devId || extractDevIdFromSsid(currentSsidRef.current || lastPenSsidRef.current);
             pushLog(`Discovery non riuscita (${e.message}). Uso il devId dedotto dal SSID: ${devId || 'non determinato'}`);
           }
         }
 
-        client = new NaxclowClient({ deviceIp, ssid: currentSsid, devId });
+        client = new NaxclowClient({ deviceIp, ssid: currentSsidRef.current || lastPenSsidRef.current, devId });
         pushLog(`Apertura connessione TCP a ${deviceIp}:6123...`);
         await client.connect();
 
@@ -260,12 +272,11 @@ export function PenConnectionProvider({ children }) {
           pushLog(`Stato penna: batteria ${status.devPower ?? '?'}%, wifi "${status.wifiName ?? '?'}", fw ${status.version ?? '?'}`);
         }
 
-        // Non avviamo più startLiveView() qui: parte in modo lazy al primo
-        // scatto (dentro requestSnapshot), altrimenti la penna comincia a
-        // martellare di dati la connessione fin da subito, anche restando
-        // sulla schermata senza scattare, ed è quello che rendeva tutta la
-        // UI lenta/bloccata appena connessi.
+        // La live view parte in modo lazy al primo scatto (vedi
+        // requestSnapshot): avviarla qui renderebbe lenta la UI.
         clientRef.current = client;
+        const thisClient = client;
+        client.onClosed((reason) => handleLostRef.current(thisClient, reason));
 
         setPenInfo({
           devId,
@@ -276,21 +287,134 @@ export function PenConnectionProvider({ children }) {
           firmwareVersion: status?.version,
         });
         setPenStatus(PEN_STATUS.CONNECTED);
+        setPenError(null);
         pushLog('Sessione penna attiva.');
-        return;
+        return { ok: true };
       } catch (e) {
         lastError = e;
         if (client) client.close();
-        pushLog(`Tentativo ${attempt}/${MAX_ATTEMPTS} fallito: ${e.message}`);
+        pushLog(`Tentativo ${attempt}/${maxAttempts} fallito: ${e.message}`);
       }
     }
+    return { ok: false, error: lastError };
+  }, [pushLog]);
 
+  // Riconnessione automatica dopo una perdita: riprova con attese crescenti,
+  // rientra nel WiFi della penna se serve, e a riconnessione avvenuta
+  // esegue l'eventuale scatto del telecomando rimasto in coda.
+  const startRecovery = useCallback(async () => {
+    if (recoveringRef.current) return;
+    recoveringRef.current = true;
+    setPenStatus(PEN_STATUS.CONNECTING);
+    setPenError('Connessione con la penna persa: riconnessione in corso...');
+    const delays = [1500, 3000, 5000, 8000, 15000];
+    const MAX_ROUNDS = 25;
+    try {
+      for (let round = 1; round <= MAX_ROUNDS && sessionDesiredRef.current; round += 1) {
+        await sleep(delays[Math.min(round - 1, delays.length - 1)]);
+        if (!sessionDesiredRef.current) break;
+        pushLog(`Riconnessione alla penna (tentativo ${round})...`);
+
+        // Il WiFi potrebbe essere caduto (spesso a schermo spento).
+        const prefix = settingsRef.current.pen.ssidPrefix || DEFAULT_SSID_PREFIX;
+        const ssid = await getCurrentSSID();
+        // ssid null = non leggibile (es. in background): non si può dire che
+        // il WiFi sia caduto, si prova direttamente il TCP.
+        if (ssid && !isPenNetwork(ssid, prefix)) {
+          const target = lastPenSsidRef.current;
+          if (!target) {
+            pushLog('Riconnessione WiFi impossibile: rete della penna sconosciuta.');
+            continue;
+          }
+          try {
+            pushLog(`Rientro nel WiFi "${target}"...`);
+            await connectToPen(target, null);
+            await sleep(1500);
+          } catch (e) {
+            pushLog(`Rientro nel WiFi fallito: ${e.message}`);
+            continue;
+          }
+        }
+
+        const result = await establishSession({ maxAttempts: 1 });
+        if (result.ok) {
+          pushLog('Riconnesso alla penna.');
+          refreshWifiStatus();
+          const pending = pendingRemoteRef.current;
+          pendingRemoteRef.current = null;
+          if (pending && Date.now() - pending.at < 90000) {
+            pushLog('Eseguo lo scatto del telecomando rimasto in attesa.');
+            setTimeout(() => captureRef.current(pending.mode, { isRetry: true }), 600);
+          }
+          return;
+        }
+      }
+      if (sessionDesiredRef.current) {
+        setPenStatus(PEN_STATUS.ERROR);
+        setPenError('Impossibile riconnettersi alla penna. Controlla che sia accesa e riconnettiti dalla schermata Penna.');
+        pushLog('Riconnessione automatica fallita: serve un intervento manuale.');
+        sessionDesiredRef.current = false;
+        setSessionDesired(false);
+      }
+    } finally {
+      recoveringRef.current = false;
+    }
+  }, [pushLog, establishSession, refreshWifiStatus]);
+
+  // La sessione verso la penna è caduta (socket chiuso, errore, o silenzio
+  // oltre il limite). `client` serve a ignorare notifiche di sessioni
+  // vecchie già sostituite.
+  const handleSessionLost = useCallback(
+    (client, reason) => {
+      if (client && clientRef.current !== client) return;
+      pushLog(`Sessione penna persa: ${reason}`);
+      if (clientRef.current) {
+        clientRef.current.close();
+        clientRef.current = null;
+      }
+      lastDisconnectAtRef.current = Date.now();
+      if (!sessionDesiredRef.current) {
+        setPenStatus(PEN_STATUS.IDLE);
+        return;
+      }
+      startRecovery();
+    },
+    [pushLog, startRecovery]
+  );
+
+  useEffect(() => {
+    handleLostRef.current = handleSessionLost;
+  }, [handleSessionLost]);
+
+  // Non rilancia l'errore: viene chiamata direttamente da un onPress in UI
+  // (nessun chiamante è pronto a gestire un reject a valle). Lo stato di
+  // errore è già esposto tramite penStatus/penError per la UI.
+  const connectPenSession = useCallback(async () => {
+    if (wifiStatus !== WIFI_STATUS.PEN_NETWORK) {
+      setPenError('Non sei connesso alla rete della penna: connettiti prima al WiFi.');
+      setPenStatus(PEN_STATUS.ERROR);
+      return;
+    }
+    if (recoveringRef.current) return;
+
+    setPenStatus(PEN_STATUS.CONNECTING);
+    setPenError(null);
+    const result = await establishSession({ maxAttempts: 3 });
+    if (result.ok) {
+      sessionDesiredRef.current = true;
+      setSessionDesired(true);
+      return;
+    }
     setPenStatus(PEN_STATUS.ERROR);
-    setPenError(friendlyPenError(lastError?.message));
-    pushLog(`Errore sessione penna: ${lastError?.message}`);
-  }, [wifiStatus, settings.pen.ip, currentSsid, pushLog]);
+    setPenError(friendlyPenError(result.error?.message));
+    pushLog(`Errore sessione penna: ${result.error?.message}`);
+  }, [wifiStatus, establishSession, pushLog]);
 
   const disconnectPenSession = useCallback(async () => {
+    // Disconnessione voluta: niente riconnessione automatica.
+    sessionDesiredRef.current = false;
+    setSessionDesired(false);
+    pendingRemoteRef.current = null;
     stopRemoteListener();
     if (clientRef.current) {
       clientRef.current.close();
@@ -327,11 +451,14 @@ export function PenConnectionProvider({ children }) {
       // non solo nel tab Log, altrimenti lo scatto fallisce "in silenzio"
       // agli occhi dell'utente sulla schermata Cattura.
       setCaptureError(friendlyPenError(e.message));
+      if (/nessuno snapshot|socket non connesso/i.test(e.message)) {
+        handleSessionLost(client, `scatto senza risposta dalla penna (${e.message})`);
+      }
       return null;
     } finally {
       setCaptureBusy(false);
     }
-  }, [penStatus, captureBusy, pushLog]);
+  }, [penStatus, captureBusy, pushLog, handleSessionLost]);
 
   // Avvia la pipeline AI/Telegram sull'ultimo scatto già visualizzato.
   // Azione separata e volontaria, innescata da un secondo pulsante in UI.
@@ -368,10 +495,16 @@ export function PenConnectionProvider({ children }) {
   // origine per l'uso "sul campo".
   // mode: 'capture_send' (scatto -> AI -> Telegram, default) oppure
   // 'capture_only' (solo foto, utile per es. sulla pressione lunga dello Shelly).
-  const captureFromRemote = useCallback(async (mode = 'capture_send') => {
+  const captureFromRemote = useCallback(async (mode = 'capture_send', { isRetry = false } = {}) => {
     const client = clientRef.current;
     if (!client || penStatus !== PEN_STATUS.CONNECTED) {
-      pushLog('Scatto da telecomando ignorato: nessuna sessione penna attiva.');
+      if (sessionDesiredRef.current && !isRetry) {
+        // Sessione caduta ma in riconnessione: l'azione resta in coda.
+        pendingRemoteRef.current = { mode, at: Date.now() };
+        pushLog('Penna non connessa al momento: scatto in coda, parte appena si riconnette.');
+      } else {
+        pushLog('Scatto da telecomando ignorato: nessuna sessione penna attiva.');
+      }
       return;
     }
     if (captureBusy || sendBusy) return;
@@ -398,10 +531,16 @@ export function PenConnectionProvider({ children }) {
       // scatto che un eventuale fallimento dell'invio, dato che questo
       // flusso li esegue in sequenza come un'unica azione dal telecomando.
       setCaptureError(friendlyPenError(e.message));
+      if (/nessuno snapshot|socket non connesso/i.test(e.message)) {
+        // La penna non risponde: la sessione è morta anche se il socket
+        // sembrava aperto. Riconnetto e riprovo lo scatto una volta sola.
+        if (!isRetry) pendingRemoteRef.current = { mode, at: Date.now() };
+        handleSessionLost(client, `scatto senza risposta dalla penna (${e.message})`);
+      }
     } finally {
       setCaptureBusy(false);
     }
-  }, [penStatus, captureBusy, sendBusy, settings, pushLog]);
+  }, [penStatus, captureBusy, sendBusy, settings, pushLog, handleSessionLost]);
 
   useEffect(() => {
     captureRef.current = captureFromRemote;
@@ -415,7 +554,9 @@ export function PenConnectionProvider({ children }) {
   }, [settings.remote.shelly.actions]);
 
   useEffect(() => {
-    if (penStatus !== PEN_STATUS.CONNECTED) return undefined;
+    // Il telecomando resta in ascolto per tutta la sessione voluta, anche
+    // durante una riconnessione automatica.
+    if (!sessionDesired) return undefined;
 
     if (settings.remote.type === 'shelly') {
       startShellyListener({
@@ -433,18 +574,16 @@ export function PenConnectionProvider({ children }) {
 
     startRemoteListener(settings.remote.triggerKeyCode, () => captureRef.current());
     return () => stopRemoteListener();
-  }, [penStatus, settings.remote.type, settings.remote.triggerKeyCode, settings.remote.shelly.mac, pushLog]);
+  }, [sessionDesired, settings.remote.type, settings.remote.triggerKeyCode, settings.remote.shelly.mac, pushLog]);
 
-  useEffect(() => {
-    // Se il WiFi lascia la rete della penna mentre la sessione è attiva,
-    // la sessione applicativa non ha più senso: la chiudiamo di riflesso.
-    if (wifiStatus === WIFI_STATUS.NOT_PEN && penStatus === PEN_STATUS.CONNECTED) {
-      disconnectPenSession();
-    }
-  }, [wifiStatus, penStatus, disconnectPenSession]);
+  // NOTA: non chiudo più la sessione quando l'SSID letto non è della penna.
+  // In background/a schermo spento Android può non restituire l'SSID, e
+  // questo faceva cadere sessioni sane. La perdita vera della penna è
+  // rilevata dal watchdog del client (vedi naxclowClient).
 
   useEffect(() => {
     return () => {
+      sessionDesiredRef.current = false;
       if (clientRef.current) clientRef.current.close();
     };
   }, []);

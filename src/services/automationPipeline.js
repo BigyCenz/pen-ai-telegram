@@ -12,6 +12,32 @@ import { analyzeImageWithAI } from './aiService';
 import { sendPhotoToTelegram, sendTextToTelegram } from './telegramService';
 import { withMobileNetwork } from './wifiManager';
 
+// Errori transitori di rete (tipici a schermo spento, quando i dati mobili
+// ci mettono un attimo a svegliarsi): vale la pena riprovare. Errori come
+// token o chat ID sbagliati no.
+function isTransientNetworkError(err) {
+  return /network request failed|impossibile raggiungere|timeout|timed out|nessuna connessione|failed to connect|aborted/i.test(
+    (err && err.message) || ''
+  );
+}
+
+// Come withMobileNetwork, ma riprova (richiedendo di nuovo i dati mobili)
+// se l'errore è di rete. assumePen: la pipeline gira con la sessione penna
+// attiva, quindi l'SSID non leggibile non significa "ho già internet".
+async function withMobileNetworkRetry(fn, ssidPrefix, attempts = 3) {
+  let lastErr = null;
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      return await withMobileNetwork(fn, ssidPrefix, { assumePen: true });
+    } catch (e) {
+      lastErr = e;
+      if (i === attempts || !isTransientNetworkError(e)) throw e;
+      await new Promise((r) => setTimeout(r, 2000 * i));
+    }
+  }
+  throw lastErr;
+}
+
 async function saveSnapshotToDisk(buffer) {
   const path = `${RNFS.CachesDirectoryPath}/snapshot_${Date.now()}.jpg`;
   await RNFS.writeFile(path, buffer.toString('base64'), 'base64');
@@ -45,7 +71,7 @@ export async function sendImageThroughPipeline({ imagePath, settings, onStatus }
   const notify = (msg) => onStatus && onStatus(msg);
   try {
     notify('Analisi con AI...');
-    const aiText = await withMobileNetwork(
+    const aiText = await withMobileNetworkRetry(
       () =>
         analyzeImageWithAI({
           endpoint: settings.ai.endpoint,
@@ -59,7 +85,7 @@ export async function sendImageThroughPipeline({ imagePath, settings, onStatus }
     );
 
     notify('Invio a Telegram...');
-    await withMobileNetwork(
+    await withMobileNetworkRetry(
       () =>
         sendPhotoToTelegram({
           botToken: settings.telegram.botToken,
@@ -78,7 +104,7 @@ export async function sendImageThroughPipeline({ imagePath, settings, onStatus }
     // l'utente lo sa anche se non ha il telefono sotto controllo.
     if (settings.telegram.botToken && settings.telegram.chatId) {
       try {
-        await withMobileNetwork(
+        await withMobileNetworkRetry(
           () =>
             sendTextToTelegram({
               botToken: settings.telegram.botToken,

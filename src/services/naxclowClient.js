@@ -76,6 +76,14 @@ const TYPE_KEEPALIVE = 100;
 const TYPE_DISCOVERY = 114;
 const TYPE_PING = 115;
 
+// Rilevamento di sessione morta (WiFi caduto, penna spenta/riavviata): un
+// socket TCP "mezzo aperto" non genera MAI eventi 'close'/'error', quindi
+// l'unico modo per accorgersene è controllare che arrivino dati.
+const PROBE_AFTER_MS = 8000; // dopo tanto silenzio mando una richiesta di stato per provocare una risposta
+const PROBE_EVERY_MS = 8000;
+const SILENCE_LIMIT_MS = 30000; // oltre tanto silenzio la sessione è considerata persa
+const WATCHDOG_TICK_MS = 3000;
+
 const ASCII_ZEROES = Buffer.from('00000000', 'ascii'); // 8 byte, per type 0/100
 const RAW_ZEROES = Buffer.alloc(8); // 8 byte a zero, per type 1/4/114/115
 
@@ -178,6 +186,13 @@ export class NaxclowClient {
     this._pendingConnectResolve = null;
 
     this._keepaliveTimer = null;
+    this._lastRxAt = Date.now();
+    this._lastKeepaliveAt = 0;
+    this._lastProbeAt = 0;
+    this._everConnected = false;
+    this._closing = false;
+    this._closeNotified = false;
+    this.closedHandlers = [];
     this._livePreviewOff = null;
     this._liveViewStarted = false;
   }
@@ -208,15 +223,65 @@ export class NaxclowClient {
           this.socket.write(buildEmptyFrame(TYPE_PING, RAW_ZEROES));
         }
       );
-      this.socket.on('error', (err) => finish(reject, err));
+      this.socket.on('error', (err) => {
+        finish(reject, err);
+        this._notifyClosed(`errore di rete: ${err && err.message}`);
+      });
       this.socket.on('data', (data) => this._onData(data));
       this.socket.on('close', () => {
         this.connected = false;
+        this._notifyClosed('connessione chiusa');
       });
     });
   }
 
+  // Sottoscrizione alla perdita della sessione (socket chiuso, errore di
+  // rete o silenzio troppo lungo). Viene chiamata una sola volta per client.
+  onClosed(handler) {
+    this.closedHandlers.push(handler);
+    return () => {
+      this.closedHandlers = this.closedHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  _notifyClosed(reason) {
+    if (this._closing || this._closeNotified || !this._everConnected) return;
+    this._closeNotified = true;
+    this._stopKeepalive();
+    this.connected = false;
+    this.closedHandlers.forEach((h) => {
+      try {
+        h(reason);
+      } catch (e) {
+        // un handler difettoso non deve impedire agli altri di essere avvisati
+      }
+    });
+  }
+
+  // Sessione considerata morta: chiude il socket e avvisa.
+  _declareDead(reason) {
+    if (this._closing || this._closeNotified) return;
+    this.connected = false;
+    try {
+      if (this.socket) this.socket.destroy();
+    } catch (e) {
+      // già chiuso
+    }
+    this._notifyClosed(reason);
+  }
+
+  _write(buf) {
+    if (!this.socket) throw new Error('Socket non connesso alla penna');
+    try {
+      this.socket.write(buf);
+    } catch (e) {
+      this._declareDead(`scrittura fallita: ${e.message}`);
+      throw new Error('Socket non connesso alla penna');
+    }
+  }
+
   _onData(chunk) {
+    this._lastRxAt = Date.now();
     this.recvBuffer = Buffer.concat([this.recvBuffer, Buffer.from(chunk)]);
     while (this.recvBuffer.length >= HEADER_LEN) {
       const length = this.recvBuffer.readUInt32LE(0);
@@ -236,6 +301,14 @@ export class NaxclowClient {
     if (type === TYPE_PING && this._awaitingPong) {
       this._awaitingPong = false;
       this.connected = true;
+      this._everConnected = true;
+      this._lastRxAt = Date.now();
+      try {
+        // keepalive TCP del sistema, se la libreria lo supporta
+        if (typeof this.socket.setKeepAlive === 'function') this.socket.setKeepAlive(true, 5000);
+      } catch (e) {
+        // opzionale
+      }
       const resolveConnect = this._pendingConnectResolve;
       this._pendingConnectResolve = null;
       if (resolveConnect) resolveConnect();
@@ -325,7 +398,7 @@ export class NaxclowClient {
 
   _sendJson(obj) {
     if (!this.connected) throw new Error('Socket non connesso alla penna');
-    this.socket.write(buildJsonMessage(obj));
+    this._write(buildJsonMessage(obj));
   }
 
   // Login: obbligatorio prima di qualsiasi comando. Risolve quando riceve
@@ -497,18 +570,41 @@ export class NaxclowClient {
   }
 
   // Keepalive periodico (osservato ogni ~9s nel pcap reale, inviato dal
-  // telefono): fire-and-forget, nessuna risposta è attesa dalla penna.
+  // telefono) + watchdog: se la penna tace troppo a lungo la sessione viene
+  // dichiarata persa (vedi onClosed). Quando non c'è la live view, la penna
+  // non manda nulla da sola, quindi dopo un po' di silenzio si invia una
+  // richiesta di stato (502/code 4) per provocare una risposta.
   _startKeepalive() {
     this._stopKeepalive();
+    this._lastRxAt = Date.now();
+    this._lastKeepaliveAt = Date.now();
+    this._lastProbeAt = 0;
     this._keepaliveTimer = setInterval(() => {
-      if (this.connected && this.socket) {
-        try {
-          this.socket.write(buildEmptyFrame(TYPE_KEEPALIVE, ASCII_ZEROES));
-        } catch (e) {
-          // se il socket si è chiuso nel mezzo, non è un errore fatale
-        }
+      if (!this.connected || !this.socket) return;
+      const now = Date.now();
+      const silentMs = now - this._lastRxAt;
+      if (silentMs > SILENCE_LIMIT_MS) {
+        this._declareDead(`nessun dato dalla penna da ${Math.round(silentMs / 1000)}s`);
+        return;
       }
-    }, 9000);
+      try {
+        if (now - this._lastKeepaliveAt >= 9000) {
+          this._lastKeepaliveAt = now;
+          this._write(buildEmptyFrame(TYPE_KEEPALIVE, ASCII_ZEROES));
+        }
+        if (silentMs > PROBE_AFTER_MS && now - this._lastProbeAt >= PROBE_EVERY_MS) {
+          this._lastProbeAt = now;
+          this._write(
+            buildJsonMessage({
+              code: 502,
+              content: { unixTimer: Math.floor(now / 1000), devTarget: this.devId, code: 4 },
+            })
+          );
+        }
+      } catch (e) {
+        // _write ha già dichiarato la sessione persa
+      }
+    }, WATCHDOG_TICK_MS);
   }
 
   _stopKeepalive() {
@@ -519,6 +615,7 @@ export class NaxclowClient {
   }
 
   close() {
+    this._closing = true;
     this._stopKeepalive();
     this.stopLivePreview();
     if (this.socket) {
@@ -528,6 +625,7 @@ export class NaxclowClient {
     this.connected = false;
     this.messageHandlers = [];
     this.frameHandlers = [];
+    this.closedHandlers = [];
     this._assembling = false;
     this._imgAssembleBuf = Buffer.alloc(0);
   }

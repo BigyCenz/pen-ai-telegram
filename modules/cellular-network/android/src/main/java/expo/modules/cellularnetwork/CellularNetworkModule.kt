@@ -63,6 +63,9 @@ class CellularNetworkModule : Module() {
 
       val request = NetworkRequest.Builder()
         .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+        // Solo reti che portano davvero a internet (esclude per esempio
+        // la rete MMS/IMS): evita di bindare il processo a una rete inutile.
+        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         .build()
 
       val callback = object : ConnectivityManager.NetworkCallback() {
