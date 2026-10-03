@@ -48,15 +48,15 @@ class ShellyBleModule : Module() {
       } else {
         ctx.startService(intent)
       }
-      null
+      Unit
     }
 
     Function("stopRemote") {
-      val ctx = appContext.reactContext ?: return@Function null
+      val ctx = appContext.reactContext ?: return@Function Unit
       ctx.startService(
         Intent(ctx, ShellyScanService::class.java).apply { action = ShellyScanService.ACTION_STOP }
       )
-      null
+      Unit
     }
 
     Function("isRunning") { ShellyBus.running }
@@ -76,7 +76,7 @@ class ShellyBleModule : Module() {
         Uri.parse("package:${ctx.packageName}")
       ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       ctx.startActivity(intent)
-      null
+      Unit
     }
   }
 }
