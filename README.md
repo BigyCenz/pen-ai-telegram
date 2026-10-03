@@ -52,7 +52,7 @@ installati.
 ## Build
 
 Il progetto usa moduli nativi (`react-native-wifi-reborn`,
-`react-native-tcp-socket`, `react-native-keyevent`, `expo-location`, più il
+`react-native-tcp-socket`, `@expo/vector-icons`, `expo-location`, più il
 modulo locale `modules/cellular-network`): **non funziona con Expo Go**, serve
 un dev client. Dopo ogni modifica a dipendenze o plugin nativi:
 
@@ -62,15 +62,10 @@ npx expo prebuild --clean
 npx expo run:android
 ```
 
-Il plugin `plugins/withKeyEvent.js` inietta in `MainActivity` l'inoltro dei
-tasti hardware al modulo `react-native-keyevent` (senza, il telecomando non
-scatterebbe): viene riapplicato automaticamente a ogni `prebuild`.
-
 ## Struttura
 
 ```
 App.js                           entry point + navigazione a tab
-plugins/withKeyEvent.js          config plugin: tasti hardware -> JS
 modules/cellular-network/        modulo nativo Kotlin: forza i dati mobili
 scripts/generate_icons.py        rigenera icona/splash (colori di theme.js)
 assets/                          icon, adaptive icon, splash, favicon
@@ -85,7 +80,6 @@ src/
     aiProviders.js / aiService.js  provider AI (Anthropic, OpenAI, Gemini)
     telegramService.js           invio foto/messaggi al bot
     automationPipeline.js        scatto -> AI -> Telegram
-    bluetoothRemoteListener.js   tasto del telecomando (con anti-rimbalzo)
     settingsValidation.js        controllo campi obbligatori
   screens/                       Penna, Cattura, Log, Impostazioni
   components/                    Card, StatusBadge, InfoRow, BottomTabBar, ...

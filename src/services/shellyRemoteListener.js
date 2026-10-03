@@ -22,6 +22,12 @@ let running = false;
 let currentMac = null;
 let currentHandlers = null; // { onEvent, onLog }
 let learnResolver = null; // se non null, il prossimo evento viene usato per imparare il MAC
+// Dopo "impara pulsante" il servizio nativo viene riavviato e la stessa
+// pressione (il pulsante ripete il pacchetto più volte) arriverebbe di nuovo
+// come evento "vero", facendo partire l'azione associata. Per qualche
+// secondo dopo l'apprendimento gli eventi vengono quindi ignorati.
+const LEARN_QUIET_MS = 6000;
+let quietUntil = 0;
 // Contatore per scartare un avvio ancora in attesa dei permessi se nel
 // frattempo è arrivato uno stop (o un nuovo avvio).
 let generation = 0;
@@ -33,6 +39,10 @@ function ensureSubscriptions() {
         const resolve = learnResolver;
         learnResolver = null;
         resolve(e);
+        return;
+      }
+      if (Date.now() < quietUntil) {
+        currentHandlers?.onLog?.(`evento ${e.event} ignorato: è la pressione usata per imparare il pulsante`);
         return;
       }
       currentHandlers?.onEvent?.(e);
@@ -119,6 +129,7 @@ export async function learnShellyButton({ timeoutMs = 30000, onLog } = {}) {
       }, timeoutMs);
       learnResolver = (e) => {
         clearTimeout(timer);
+        quietUntil = Date.now() + LEARN_QUIET_MS;
         resolve(e);
       };
     });
