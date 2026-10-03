@@ -56,6 +56,7 @@ class ShellyScanService : Service() {
   private var scanCallback: ScanCallback? = null
   private var wakeLock: PowerManager.WakeLock? = null
   private var wifiLock: WifiManager.WifiLock? = null
+  private var wifiLockLowLatency: WifiManager.WifiLock? = null
   private val lastSeen = HashMap<String, Pair<Int, Long>>() // mac -> (packetId, timestamp)
 
   override fun onBind(intent: Intent?): IBinder? = null
@@ -119,6 +120,7 @@ class ShellyScanService : Service() {
     ShellyBus.running = true
   }
 
+  @Suppress("DEPRECATION")
   private fun acquireLocks() {
     if (wakeLock == null) {
       val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -129,14 +131,20 @@ class ShellyScanService : Service() {
     }
     if (wifiLock == null) {
       val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-      val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-      } else {
-        @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF
-      }
-      wifiLock = wm?.createWifiLock(mode, "penai:shelly")?.apply {
+      // WIFI_MODE_FULL_LOW_LATENCY funziona solo con schermo acceso e app in
+      // primo piano; a schermo spento il WiFi andrebbe in risparmio energia e
+      // la sessione con la penna cadrebbe. WIFI_MODE_FULL_HIGH_PERF (deprecato
+      // ma ancora onorato) tiene il WiFi sveglio anche a schermo spento: li
+      // tengo entrambi.
+      wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "penai:shelly-hp")?.apply {
         setReferenceCounted(false)
         acquire()
+      }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        wifiLockLowLatency = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "penai:shelly-ll")?.apply {
+          setReferenceCounted(false)
+          acquire()
+        }
       }
     }
   }
@@ -144,8 +152,10 @@ class ShellyScanService : Service() {
   private fun releaseLocks() {
     try { wakeLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
     try { wifiLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
+    try { wifiLockLowLatency?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
     wakeLock = null
     wifiLock = null
+    wifiLockLowLatency = null
   }
 
   private fun hasScanPermission(): Boolean {

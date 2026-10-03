@@ -171,7 +171,23 @@ export async function disconnectFromPen() {
 // "Nax_"), così il controllo "sono ancora sulla rete della penna?" sotto è
 // corretto anche con un prefisso personalizzato, non solo con quello di
 // default.
-export async function withMobileNetwork(fn, ssidPrefix) {
+// Le chiamate sono messe in coda una alla volta: il binding del processo è
+// globale, quindi due chiamate in parallelo si pesterebbero i piedi (la
+// prima che finisce rilascerebbe i dati mobili sotto la seconda, che
+// fallirebbe con "Network request failed").
+let mobileNetworkChain = Promise.resolve();
+
+// opts.assumePen: da usare quando l'app SA di avere una sessione con la
+// penna attiva. A schermo spento Android può non restituire l'SSID: senza
+// questo flag l'app crederebbe di avere già internet, non userebbe i dati
+// mobili e la richiesta fallirebbe sul WiFi della penna (che non ha internet).
+export function withMobileNetwork(fn, ssidPrefix, opts = {}) {
+  const run = mobileNetworkChain.then(() => runWithMobileNetwork(fn, ssidPrefix, opts));
+  mobileNetworkChain = run.catch(() => {});
+  return run;
+}
+
+async function runWithMobileNetwork(fn, ssidPrefix, { assumePen = false } = {}) {
   if (Platform.OS !== 'android') {
     // Il modulo nativo è Android-only (vedi CellularNetworkModule.web.ts,
     // no-op): su altre piattaforme non c'è il problema di
@@ -184,7 +200,8 @@ export async function withMobileNetwork(fn, ssidPrefix) {
   // consumerebbe traffico dati e, senza SIM/dati attivi, farebbe solo
   // aspettare il timeout di requestCellular() prima di ogni chiamata.
   const currentSsid = await getCurrentSSID();
-  if (!isPenNetwork(currentSsid, ssidPrefix)) {
+  const onPen = isPenNetwork(currentSsid, ssidPrefix) || (assumePen && !currentSsid);
+  if (!onPen) {
     return fn();
   }
 
@@ -207,7 +224,7 @@ export async function withMobileNetwork(fn, ssidPrefix) {
     // di nuovo tutto lì senza motivo (o peggio, su una rete sbagliata).
     try {
       const ssid = await getCurrentSSID();
-      if (isPenNetwork(ssid, ssidPrefix)) {
+      if (isPenNetwork(ssid, ssidPrefix) || (assumePen && !ssid)) {
         await WifiManager.forceWifiUsageWithOptions(true, { noInternet: true });
       }
     } catch (e) {
