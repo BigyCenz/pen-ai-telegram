@@ -6,7 +6,8 @@ export type ShellyButtonEventName = 'single' | 'double' | 'triple' | 'long' | 'h
 interface ShellyBleModuleInterface {
   // Avvia il servizio in primo piano con la scansione BLE filtrata BTHome.
   // mac = null → ascolta tutti i dispositivi BTHome (modalità "impara").
-  startRemote(mac: string | null): void;
+  // scan = false: solo servizio custode (lock + battito), nessuna scansione BLE.
+  startRemote(mac: string | null, scan: boolean): void;
   stopRemote(): void;
   isRunning(): boolean;
   isIgnoringBatteryOptimizations(): boolean;

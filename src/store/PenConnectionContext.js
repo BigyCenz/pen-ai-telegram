@@ -24,6 +24,7 @@ import {
   DEFAULT_SSID_PREFIX,
 } from '../services/wifiManager';
 import { NaxclowClient, discoverDevice, extractDevIdFromSsid } from '../services/naxclowClient';
+import { bgSleep, bgSetTimeout } from '../services/bgTimers';
 import { startShellyListener, stopShellyListener } from '../services/shellyRemoteListener';
 import { captureSnapshot, sendImageThroughPipeline, runCaptureToTelegramFlow } from '../services/automationPipeline';
 import { validateSettings } from '../services/settingsValidation';
@@ -215,7 +216,7 @@ export function PenConnectionProvider({ children }) {
 
   // --- Sessione applicativa verso la penna (richiede WIFI_STATUS.PEN_NETWORK) ---
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sleep = bgSleep;
 
   // Apre la sessione TCP verso la penna (discovery, handshake, login) con
   // fino a maxAttempts tentativi. Non guarda lo stato WiFi in React (che può
@@ -348,7 +349,7 @@ export function PenConnectionProvider({ children }) {
           pendingRemoteRef.current = null;
           if (pending && Date.now() - pending.at < 90000) {
             pushLog('Eseguo lo scatto del telecomando rimasto in attesa.');
-            setTimeout(() => captureRef.current(pending.mode, { isRetry: true }), 600);
+            bgSetTimeout(() => captureRef.current(pending.mode, { isRetry: true }), 600);
           }
           return;
         }
@@ -564,6 +565,8 @@ export function PenConnectionProvider({ children }) {
     startShellyListener({
       mac: settings.remote.shelly.mac,
       onLog: (msg) => pushLog(`[Shelly] ${msg}`),
+      // Battito nativo: tiene vivi keepalive e watchdog anche a schermo spento.
+      onTick: () => clientRef.current?.tick(),
       onEvent: (e) => {
         const action = shellyActionsRef.current[e.event] || 'none';
         pushLog(`[Shelly] ${e.event} da ${e.mac} (pacchetto ${e.packetId}, rssi ${e.rssi}) -> ${action}`);

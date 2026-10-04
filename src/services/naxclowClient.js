@@ -63,6 +63,7 @@
 // affidabile perché dipende da un pattern di naming non garantito su tutti
 // i firmware/modelli.
 
+import { bgSetTimeout, bgClearTimeout } from './bgTimers';
 import TcpSocket from 'react-native-tcp-socket';
 
 const DEVICE_PORT = 6123;
@@ -129,12 +130,12 @@ export function discoverDevice({ deviceIp, devicePort = DEVICE_PORT, timeoutMs =
     const settle = (fn, arg) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      bgClearTimeout(timeout);
       if (socket) socket.destroy();
       fn(arg);
     };
 
-    const timeout = setTimeout(() => {
+    const timeout = bgSetTimeout(() => {
       settle(reject, new Error('Timeout discovery devId: la penna non ha risposto al frame type=114'));
     }, timeoutMs);
 
@@ -201,14 +202,14 @@ export class NaxclowClient {
   connect(timeoutMs = 5000) {
     return new Promise((resolve, reject) => {
       let settled = false;
-      const overallTimeout = setTimeout(() => {
+      const overallTimeout = bgSetTimeout(() => {
         finish(reject, new Error('Timeout connessione/handshake iniziale con la penna (ping/pong type=115 senza risposta)'));
       }, timeoutMs);
 
       const finish = (fn, arg) => {
         if (settled) return;
         settled = true;
-        clearTimeout(overallTimeout);
+        bgClearTimeout(overallTimeout);
         fn(arg);
       };
 
@@ -411,7 +412,7 @@ export class NaxclowClient {
     return new Promise((resolve, reject) => {
       if (!this.devId) return reject(new Error('devId non determinato: esegui discoverDevice() oppure passa lo SSID (es. Nax_XXXX) al client'));
 
-      const timeout = setTimeout(() => {
+      const timeout = bgSetTimeout(() => {
         off();
         reject(new Error('Timeout login: nessuna risposta dalla penna'));
       }, timeoutMs);
@@ -425,7 +426,7 @@ export class NaxclowClient {
           return;
         }
         if (msg.code === 501) {
-          clearTimeout(timeout);
+          bgClearTimeout(timeout);
           off();
           if (msg.status === 200) {
             this._startKeepalive();
@@ -451,7 +452,7 @@ export class NaxclowClient {
   // limita a risolvere con null se non arriva risposta in tempo.
   queryStatus(timeoutMs = 4000) {
     return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
+      const timeout = bgSetTimeout(() => {
         off();
         resolve(null);
       }, timeoutMs);
@@ -465,7 +466,7 @@ export class NaxclowClient {
           return;
         }
         if (msg.code === 502 && msg.content && msg.content.code === 4) {
-          clearTimeout(timeout);
+          bgClearTimeout(timeout);
           off();
           resolve(msg.content);
         }
@@ -477,7 +478,7 @@ export class NaxclowClient {
           content: { unixTimer: Math.floor(Date.now() / 1000), devTarget: this.devId, code: 4 },
         });
       } catch (e) {
-        clearTimeout(timeout);
+        bgClearTimeout(timeout);
         off();
         resolve(null);
       }
@@ -512,7 +513,7 @@ export class NaxclowClient {
     return new Promise((resolve, reject) => {
       const seqAtRequest = this._frameSeq;
 
-      const timeout = setTimeout(() => {
+      const timeout = bgSetTimeout(() => {
         off();
         offAck();
         reject(new Error('Timeout: nessuno snapshot ricevuto dalla penna dopo il comando'));
@@ -520,7 +521,7 @@ export class NaxclowClient {
 
       const off = this.onFrame((frameBuf, seq) => {
         if (seq > seqAtRequest) {
-          clearTimeout(timeout);
+          bgClearTimeout(timeout);
           off();
           offAck();
           resolve(frameBuf);
@@ -579,23 +580,29 @@ export class NaxclowClient {
     this._stopKeepalive();
     this._lastRxAt = Date.now();
     this._lastKeepaliveAt = Date.now();
-    this._keepaliveTimer = setInterval(() => {
-      if (!this.connected || !this.socket) return;
-      const now = Date.now();
-      const silentMs = now - this._lastRxAt;
-      if (this._liveViewStarted && silentMs > SILENCE_LIMIT_MS) {
-        this._declareDead(`nessun dato dalla penna da ${Math.round(silentMs / 1000)}s`);
-        return;
+    // In primo piano basta questo timer; a schermo spento i timer JS sono
+    // fermi e tick() viene chiamato dal battito nativo (vedi Context).
+    this._keepaliveTimer = setInterval(() => this.tick(), WATCHDOG_TICK_MS);
+  }
+
+  // Keepalive + watchdog. Idempotente: si può chiamare quanto si vuole, il
+  // keepalive parte solo se sono passati 9 s dall'ultimo.
+  tick() {
+    if (!this.connected || !this.socket) return;
+    const now = Date.now();
+    const silentMs = now - this._lastRxAt;
+    if (this._liveViewStarted && silentMs > SILENCE_LIMIT_MS) {
+      this._declareDead(`nessun dato dalla penna da ${Math.round(silentMs / 1000)}s`);
+      return;
+    }
+    try {
+      if (now - this._lastKeepaliveAt >= 9000) {
+        this._lastKeepaliveAt = now;
+        this._write(buildEmptyFrame(TYPE_KEEPALIVE, ASCII_ZEROES));
       }
-      try {
-        if (now - this._lastKeepaliveAt >= 9000) {
-          this._lastKeepaliveAt = now;
-          this._write(buildEmptyFrame(TYPE_KEEPALIVE, ASCII_ZEROES));
-        }
-      } catch (e) {
-        // _write ha già dichiarato la sessione persa
-      }
-    }, WATCHDOG_TICK_MS);
+    } catch (e) {
+      // _write ha già dichiarato la sessione persa
+    }
   }
 
   _stopKeepalive() {

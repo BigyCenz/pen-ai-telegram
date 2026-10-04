@@ -17,6 +17,8 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.IBinder
 import android.os.ParcelUuid
 import android.os.PowerManager
@@ -26,6 +28,9 @@ import android.os.PowerManager
 object ShellyBus {
   @Volatile var onButton: ((mac: String, event: String, packetId: Int, rssi: Int) -> Unit)? = null
   @Volatile var onLog: ((String) -> Unit)? = null
+  // Battito nativo (1 al secondo) che continua anche a schermo spento: i timer
+  // JS di React Native si fermano quando l'app va in background, questo no.
+  @Volatile var onTick: (() -> Unit)? = null
   @Volatile var running: Boolean = false
 }
 
@@ -43,6 +48,10 @@ class ShellyScanService : Service() {
     const val ACTION_START = "expo.modules.shellyble.START"
     const val ACTION_STOP = "expo.modules.shellyble.STOP"
     const val EXTRA_MAC = "mac"
+    // false = niente scansione BLE: il servizio resta solo come "custode" della
+    // sessione con la penna (wake lock, WiFi lock, battito per il JS).
+    const val EXTRA_SCAN = "scan"
+    private const val TICK_MS = 1000L
     private const val CHANNEL_ID = "shelly_remote"
     private const val NOTIF_ID = 4711
     // Lo stesso evento viene ripetuto più volte con lo stesso packet id: lo
@@ -58,6 +67,13 @@ class ShellyScanService : Service() {
   private var wifiLock: WifiManager.WifiLock? = null
   private var wifiLockLowLatency: WifiManager.WifiLock? = null
   private val lastSeen = HashMap<String, Pair<Int, Long>>() // mac -> (packetId, timestamp)
+  private val tickHandler = Handler(Looper.getMainLooper())
+  private val tickRunnable = object : Runnable {
+    override fun run() {
+      ShellyBus.onTick?.invoke()
+      tickHandler.postDelayed(this, TICK_MS)
+    }
+  }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -71,13 +87,20 @@ class ShellyScanService : Service() {
     acquireLocks()
     stopScan() // se era già in corso (es. cambio MAC) riparto da zero
     lastSeen.clear()
-    startScan(intent?.getStringExtra(EXTRA_MAC)?.takeIf { it.isNotBlank() })
+    tickHandler.removeCallbacks(tickRunnable)
+    tickHandler.postDelayed(tickRunnable, TICK_MS)
+    if (intent?.getBooleanExtra(EXTRA_SCAN, true) != false) {
+      startScan(intent?.getStringExtra(EXTRA_MAC)?.takeIf { it.isNotBlank() })
+    } else {
+      log("Servizio attivo senza scansione BLE (nessun pulsante configurato).")
+    }
     // NOT_STICKY: se il sistema uccide il processo, anche il JS (che gestisce
     // scatto e invio) è morto, quindi un riavvio del solo servizio non servirebbe.
     return START_NOT_STICKY
   }
 
   override fun onDestroy() {
+    tickHandler.removeCallbacks(tickRunnable)
     stopScan()
     releaseLocks()
     ShellyBus.running = false
@@ -105,8 +128,8 @@ class ShellyScanService : Service() {
       @Suppress("DEPRECATION") Notification.Builder(this)
     }
     val notification = builder
-      .setContentTitle("Telecomando Shelly attivo")
-      .setContentText("In ascolto del pulsante, anche a schermo spento")
+      .setContentTitle("Pen AI attiva")
+      .setContentText("Sessione con la penna e telecomando, anche a schermo spento")
       .setSmallIcon(applicationInfo.icon)
       .setOngoing(true)
       .apply { if (pending != null) setContentIntent(pending) }
@@ -169,19 +192,16 @@ class ShellyScanService : Service() {
   private fun startScan(mac: String?) {
     if (!hasScanPermission()) {
       log("Scansione BLE non avviata: permesso Bluetooth/posizione mancante.")
-      shutdown()
       return
     }
     val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     if (adapter == null || !adapter.isEnabled) {
       log("Scansione BLE non avviata: Bluetooth spento o non disponibile.")
-      shutdown()
       return
     }
     val scanner = adapter.bluetoothLeScanner
     if (scanner == null) {
       log("Scansione BLE non avviata: scanner BLE non disponibile.")
-      shutdown()
       return
     }
 
@@ -210,10 +230,8 @@ class ShellyScanService : Service() {
       log(if (mac != null) "Scansione BLE avviata (solo $mac)." else "Scansione BLE avviata (tutti i dispositivi BTHome).")
     } catch (e: SecurityException) {
       log("Scansione BLE negata dal sistema: ${e.message}")
-      shutdown()
     } catch (e: Exception) {
       log("Scansione BLE non avviata: ${e.message}")
-      shutdown()
     }
   }
 
@@ -250,6 +268,7 @@ class ShellyScanService : Service() {
   }
 
   private fun shutdown() {
+    tickHandler.removeCallbacks(tickRunnable)
     stopScan()
     releaseLocks()
     ShellyBus.running = false

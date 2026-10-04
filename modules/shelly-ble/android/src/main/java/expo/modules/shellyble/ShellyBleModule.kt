@@ -18,7 +18,7 @@ class ShellyBleModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ShellyBle")
 
-    Events("onButtonEvent", "onRemoteLog")
+    Events("onButtonEvent", "onRemoteLog", "onTick")
 
     OnCreate {
       ShellyBus.onButton = { mac, event, packetId, rssi ->
@@ -28,20 +28,23 @@ class ShellyBleModule : Module() {
         )
       }
       ShellyBus.onLog = { msg -> sendEvent("onRemoteLog", mapOf("message" to msg)) }
+      ShellyBus.onTick = { sendEvent("onTick", mapOf("t" to System.currentTimeMillis())) }
     }
 
     OnDestroy {
       ShellyBus.onButton = null
       ShellyBus.onLog = null
+      ShellyBus.onTick = null
     }
 
     // Avvia il servizio in primo piano. mac = null → ascolta qualunque
     // dispositivo BTHome (serve per "imparare" il pulsante).
-    Function("startRemote") { mac: String? ->
+    Function("startRemote") { mac: String?, scan: Boolean ->
       val ctx = appContext.reactContext ?: throw Exceptions.ReactContextLost()
       val intent = Intent(ctx, ShellyScanService::class.java).apply {
         action = ShellyScanService.ACTION_START
         putExtra(ShellyScanService.EXTRA_MAC, mac)
+        putExtra(ShellyScanService.EXTRA_SCAN, scan)
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         ctx.startForegroundService(intent)
