@@ -10,17 +10,20 @@ import {
   stopRemote,
   addButtonListener,
   addLogListener,
+  addTickListener,
   isIgnoringBatteryOptimizations,
   requestIgnoreBatteryOptimizations,
 } from '../../modules/shelly-ble/src';
 import { normalizeMac, isValidMac } from './shellyConstants';
+import { pumpTimers } from './bgTimers';
 
 // Stato del modulo: un solo servizio, quindi un solo "ascoltatore attivo".
 let buttonSub = null;
 let logSub = null;
+let tickSub = null;
 let running = false;
 let currentMac = null;
-let currentHandlers = null; // { onEvent, onLog }
+let currentHandlers = null; // { onEvent, onLog, onTick }
 let learnResolver = null; // se non null, il prossimo evento viene usato per imparare il MAC
 // Dopo "impara pulsante" il servizio nativo viene riavviato e la stessa
 // pressione (il pulsante ripete il pacchetto più volte) arriverebbe di nuovo
@@ -51,13 +54,23 @@ function ensureSubscriptions() {
   if (!logSub) {
     logSub = addLogListener((e) => currentHandlers?.onLog?.(e.message));
   }
+  if (!tickSub) {
+    // Battito nativo (1/s, anche a schermo spento): fa scattare i timer JS
+    // scaduti e dà il ritmo a keepalive e watchdog della sessione penna.
+    tickSub = addTickListener(() => {
+      pumpTimers();
+      currentHandlers?.onTick?.();
+    });
+  }
 }
 
 function dropSubscriptions() {
   buttonSub?.remove();
   logSub?.remove();
+  tickSub?.remove();
   buttonSub = null;
   logSub = null;
+  tickSub = null;
 }
 
 // Chiede i permessi runtime necessari. Restituisce { ok, missing }.
@@ -81,20 +94,27 @@ export async function ensureShellyPermissions() {
   return { ok: blocking.length === 0, missing };
 }
 
-// Avvia l'ascolto del pulsante con MAC noto. onEvent riceve
-// { mac, event, packetId, rssi } SOLO per quel MAC (filtro già nel nativo).
-export async function startShellyListener({ mac, onEvent, onLog }) {
+// Avvia il servizio in primo piano. Con un MAC valido ascolta il pulsante:
+// onEvent riceve { mac, event, packetId, rssi } SOLO per quel MAC (filtro già
+// nel nativo). Senza MAC valido il servizio parte lo stesso, senza scansione
+// BLE: serve comunque a tenere viva la sessione con la penna a schermo spento
+// (wake lock, WiFi lock e battito per keepalive e timer).
+// onTick viene chiamato a ogni battito nativo (1 al secondo).
+export async function startShellyListener({ mac, onEvent, onLog, onTick }) {
   const target = normalizeMac(mac);
-  if (!isValidMac(target)) throw new Error('MAC del pulsante non valido: usa "Impara pulsante".');
+  const scan = isValidMac(target);
   const gen = ++generation;
   const { ok } = await ensureShellyPermissions();
   if (gen !== generation) return; // fermato o riavviato mentre aspettavo i permessi
-  if (!ok) throw new Error('Permesso Bluetooth negato: serve per ascoltare il pulsante Shelly.');
+  if (scan && !ok) throw new Error('Permesso Bluetooth negato: serve per ascoltare il pulsante Shelly.');
+  if (!scan) {
+    onLog?.('Nessun pulsante configurato: il servizio resta attivo solo per tenere viva la sessione con la penna.');
+  }
 
-  currentHandlers = { onEvent, onLog };
+  currentHandlers = { onEvent, onLog, onTick };
   ensureSubscriptions();
-  currentMac = target;
-  startRemote(target);
+  currentMac = scan ? target : null;
+  startRemote(currentMac, scan);
   running = true;
 }
 
@@ -136,18 +156,18 @@ export async function learnShellyButton({ timeoutMs = 30000, onLog } = {}) {
     return event.mac;
   } finally {
     learnResolver = null;
-    if (previous && previous.mac) {
+    if (previous) {
+      // Ripristina com'era: con scansione se c'era un MAC, altrimenti solo
+      // servizio custode della sessione.
       currentMac = previous.mac;
       currentHandlers = previous.handlers;
-      startRemote(previous.mac);
+      startRemote(previous.mac, !!previous.mac);
     } else {
       stopRemote();
       running = false;
       currentMac = null;
-      if (!previous) {
-        currentHandlers = null;
-        dropSubscriptions();
-      }
+      currentHandlers = null;
+      dropSubscriptions();
     }
   }
 }

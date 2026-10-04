@@ -12,8 +12,8 @@ export interface ShellyButtonEvent {
 
 const emitter = new EventEmitter(ShellyBleModule as any);
 
-export function startRemote(mac: string | null): void {
-  ShellyBleModule.startRemote(mac);
+export function startRemote(mac: string | null, scan: boolean = true): void {
+  ShellyBleModule.startRemote(mac, scan);
 }
 
 export function stopRemote(): void {
@@ -34,6 +34,11 @@ export function requestIgnoreBatteryOptimizations(): void {
 
 export function addButtonListener(listener: (e: ShellyButtonEvent) => void): Subscription {
   return emitter.addListener('onButtonEvent', listener);
+}
+
+// Battito nativo ogni secondo, attivo anche a schermo spento (i timer JS no).
+export function addTickListener(listener: () => void): Subscription {
+  return emitter.addListener('onTick', listener);
 }
 
 export function addLogListener(listener: (e: { message: string }) => void): Subscription {

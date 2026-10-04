@@ -11,6 +11,7 @@ import RNFS from 'react-native-fs';
 import { analyzeImageWithAI } from './aiService';
 import { sendPhotoToTelegram, sendTextToTelegram } from './telegramService';
 import { withMobileNetwork } from './wifiManager';
+import { bgSleep } from './bgTimers';
 
 // Errori transitori di rete (tipici a schermo spento, quando i dati mobili
 // ci mettono un attimo a svegliarsi): vale la pena riprovare. Errori come
@@ -32,7 +33,7 @@ async function withMobileNetworkRetry(fn, ssidPrefix, attempts = 3) {
     } catch (e) {
       lastErr = e;
       if (i === attempts || !isTransientNetworkError(e)) throw e;
-      await new Promise((r) => setTimeout(r, 2000 * i));
+      await bgSleep(2000 * i);
     }
   }
   throw lastErr;
