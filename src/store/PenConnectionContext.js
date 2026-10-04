@@ -271,8 +271,13 @@ export function PenConnectionProvider({ children }) {
           pushLog(`Stato penna: batteria ${status.devPower ?? '?'}%, wifi "${status.wifiName ?? '?'}", fw ${status.version ?? '?'}`);
         }
 
-        // La live view parte in modo lazy al primo scatto (vedi
-        // requestSnapshot): avviarla qui renderebbe lenta la UI.
+        // Live view subito dopo lo stato, come fa l'app originale (pcap:
+        // login -> stato -> live view in meno di un secondo). Senza, la
+        // penna considera la sessione inattiva e chiude la connessione dopo
+        // ~15 s (si vede la penna lampeggiare). I frame non richiesti
+        // vengono scartati subito (vedi _handleImageChunk), quindi il costo
+        // sul thread JS è basso.
+        client.startLiveView();
         clientRef.current = client;
         const thisClient = client;
         client.onClosed((reason) => handleLostRef.current(thisClient, reason));

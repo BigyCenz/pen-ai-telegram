@@ -488,14 +488,13 @@ export class NaxclowClient {
   // autonomia un flusso continuo di frame JPEG (type=1) intrecciati a video
   // live non decifrato (type=4), senza bisogno di altri comandi espliciti.
   //
-  // IMPORTANTE: non va chiamata subito dopo la connessione/login, solo
-  // quando serve davvero uno scatto (vedi requestSnapshot). Appena parte,
-  // la penna martella di dati continui la connessione TCP: se nessuno sta
-  // aspettando un frame, quei dati vanno comunque scartati non appena
-  // arrivano (vedi _handleImageChunk), ma è comunque traffico continuo sul
-  // thread JS. Non è stato osservato nel pcap un comando per fermarla, per
-  // questo il flusso resta "acceso" per tutta la sessione una volta
-  // avviato: motivo in più per ritardarne l'avvio al minimo indispensabile.
+  // IMPORTANTE: va chiamata SUBITO dopo login e stato, come fa l'app
+  // originale (pcap pen2: live view meno di un secondo dopo lo stato). Senza,
+  // la penna considera la sessione inattiva e chiude la connessione dopo
+  // ~15 s. Il flusso resta acceso per tutta la sessione (nel pcap non c'è un
+  // comando per fermarlo); i frame che nessuno sta aspettando vengono scartati
+  // subito (vedi _handleImageChunk). Essendo continuo, il flusso fa anche da
+  // segnale di vita: il watchdog dichiara la sessione persa se tace.
   startLiveView() {
     if (this._liveViewStarted) return;
     this._liveViewStarted = true;
@@ -503,8 +502,8 @@ export class NaxclowClient {
   }
 
   // Richiede uno "snapshot": in realtà si aggancia al flusso di frame JPEG
-  // già in corso (avviato qui stesso, in modo lazy, alla prima richiesta —
-  // non più subito dopo la connessione). Per evitare di restituire un
+  // già in corso (la live view parte subito dopo la connessione, vedi
+  // PenConnectionContext). Per evitare di restituire un
   // frame già a metà ricezione nel momento in cui il comando viene inviato,
   // si aspetta il primo frame la cui ricostruzione INIZIA dopo l'invio del
   // comando 218 (tramite il contatore _frameSeq).
